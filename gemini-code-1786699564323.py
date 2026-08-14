@@ -1,6 +1,8 @@
 import os
 import re
+import math
 import fnmatch
+import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -17,13 +19,11 @@ class CNCAnalyzerApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("1050x650")
-        self.root.minsize(800, 500)
+        self.root.geometry("1100x680")
+        self.root.minsize(850, 520)
 
-        # Structure de données globale
         self.all_data = []
 
-        # Construction de l'interface graphique
         self._create_header()
         self._create_toolbar()
         self._create_treeview()
@@ -86,17 +86,24 @@ class CNCAnalyzerApp:
 
         self.tree.heading("index", text="N°", command=lambda: self.sort_column("index", False))
         self.tree.heading("model", text="Nom du Modèle", command=lambda: self.sort_column("model", False))
-        self.tree.heading("program", text="N° Programme", command=lambda: self.sort_column("program", False))
+        self.tree.heading("program", text="N° Programme (Fichier)", command=lambda: self.sort_column("program", False))
         self.tree.heading("tools", text="Outils (T...)", command=lambda: self.sort_column("tools", False))
         self.tree.heading("time_100", text="Temps (100%)", command=lambda: self.sort_column("time_100", False))
         self.tree.heading("time_70", text="Temps NUM 1060 (70%)", command=lambda: self.sort_column("time_70", False))
 
-        self.tree.column("index", width=60, anchor=tk.CENTER)
-        self.tree.column("model", width=260, anchor=tk.W)
-        self.tree.column("program", width=120, anchor=tk.CENTER)
-        self.tree.column("tools", width=200, anchor=tk.W)
+        self.tree.column("index", width=50, anchor=tk.CENTER)
+        self.tree.column("model", width=250, anchor=tk.W)
+        self.tree.column("program", width=200, anchor=tk.W)
+        self.tree.column("tools", width=180, anchor=tk.W)
         self.tree.column("time_100", width=130, anchor=tk.CENTER)
         self.tree.column("time_70", width=160, anchor=tk.CENTER)
+
+        # Style pour la sélection verte
+        style = ttk.Style()
+        style.theme_use("default")
+        style.map("Treeview",
+                  background=[('selected', '#2ecc71')],  # Vert clair
+                  foreground=[('selected', '#ffffff')])  # Texte blanc
 
         vsb = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
@@ -109,6 +116,9 @@ class CNCAnalyzerApp:
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
+        # Double-clic pour ouvrir dans le Bloc-notes
+        self.tree.bind("<Double-1>", self.open_in_notepad)
+
     def _create_statusbar(self):
         self.statusbar = ttk.Label(
             self.root,
@@ -118,67 +128,128 @@ class CNCAnalyzerApp:
         )
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
+    def estimate_machining_time(self, content):
+        """
+        Estimation cinématique du temps d'usinage
+        Prend en compte l'avance F, le profil d'accélération et les rapides G0.
+        """
+        lines = content.splitlines()
+        total_seconds = 0.0
+        
+        curr_x, curr_y, curr_z = 0.0, 0.0, 0.0
+        feed_rate = 5000.0  # mm/min par défaut
+        g_mode = "G1"
+        rapid_rate = 15000.0  # mm/min pour G0 (NUM 1060)
+
+        g_code_pattern = re.compile(r'([GXYZF])\s*([\-\+]?\d+\.?\d*)', re.IGNORECASE)
+
+        for line in lines:
+            line_clean = line.split(';')[0].split('(')[0].strip()
+            if not line_clean:
+                continue
+
+            matches = g_code_pattern.findall(line_clean)
+            if not matches:
+                continue
+
+            new_x, new_y, new_z = curr_x, curr_y, curr_z
+            has_motion = False
+
+            for cmd, val in matches:
+                cmd = cmd.upper()
+                v = float(val)
+
+                if cmd == 'G':
+                    g_num = int(v)
+                    if g_num == 0:
+                        g_mode = "G0"
+                    elif g_num in (1, 2, 3):
+                        g_mode = "G1"
+                elif cmd == 'F':
+                    if v > 0:
+                        feed_rate = v
+                elif cmd == 'X':
+                    new_x = v
+                    has_motion = True
+                elif cmd == 'Y':
+                    new_y = v
+                    has_motion = True
+                elif cmd == 'Z':
+                    new_z = v
+                    has_motion = True
+
+            if has_motion:
+                dist = math.sqrt((new_x - curr_x)**2 + (new_y - curr_y)**2 + (new_z - curr_z)**2)
+                if dist > 0:
+                    speed = rapid_rate if g_mode == "G0" else feed_rate
+                    if speed <= 0:
+                        speed = 3000.0
+                    
+                    time_min = dist / speed
+                    time_sec = time_min * 60.0
+                    
+                    # Pénalité d'accélération/décélération pour micro-segments
+                    if dist < 5.0 and g_mode == "G1":
+                        time_sec *= 1.35
+                    
+                    total_seconds += time_sec
+
+                curr_x, curr_y, curr_z = new_x, new_y, new_z
+
+        return max(total_seconds, len(lines) * 0.15)
+
     def parse_cnc_file(self, filepath, filename):
+        # 1. NOM DU PROGRAMME = NOM DU FICHIER
+        prog_name = filename
         model_name = ""
-        prog_name = ""
         tools = []
-        total_time_seconds = 0.0
 
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
 
             lines = content.splitlines()
-            header_lines = lines[:25]
-            full_header_text = "\n".join(header_lines)
 
-            # --- 1. EXTRACTION N° PROGRAMME ---
-            prog_match = re.search(r'\$PAIN\s+([A-Za-z0-9_\-]+)', full_header_text, re.IGNORECASE)
-            if not prog_match:
-                prog_match = re.search(r'%([A-Za-z0-9_\-]+)', full_header_text)
-            if not prog_match:
-                prog_match = re.search(r'\b(O\d{4,5})\b', full_header_text, re.IGNORECASE)
+            # 2. EXTRACTION NOM DU MODÈLE DEPUIS $PAIN
+            for line in lines[:30]:
+                if "$PAIN" in line.upper():
+                    # Exemple: "$PAIN 0021A PAD-10'6F" -> extraire "PAD-10'6F"
+                    match = re.search(r'\$PAIN\s+\S+\s+(.+)', line, re.IGNORECASE)
+                    if match:
+                        model_name = match.group(1).strip()
+                        break
+                    else:
+                        parts = line.strip().split()
+                        if len(parts) >= 3:
+                            model_name = " ".join(parts[2:]).strip()
+                            break
 
-            if prog_match:
-                prog_name = prog_match.group(1)
-            else:
-                prog_name = os.path.splitext(filename)[0]
-
-            # --- 2. EXTRACTION NOM DU MODÈLE ---
-            model_match = re.search(r'([A-Za-z0-9_\-\']+(?:PAD|BOARD|MOULE|SURF|SKIL|PADDEL)[A-Za-z0-9_\-\']*)', full_header_text, re.IGNORECASE)
-            if model_match:
-                model_name = model_match.group(1)
-            else:
-                for line in header_lines:
+            # Repli si pas de $PAIN explicite
+            if not model_name:
+                for line in lines[:25]:
                     clean_line = line.strip().lstrip('(%#$* ;')
                     if clean_line and not clean_line.startswith('G') and not clean_line.startswith('M') and len(clean_line) > 2:
                         model_name = clean_line[:35].strip()
                         break
+
             if not model_name:
                 model_name = os.path.splitext(filename)[0]
 
-            # --- 3. BALAYAGE COMPLET DU FICHIER POUR LES OUTILS (T1+T5+T8...) ---
-            # Recherche de toutes les occurrences T1, T01, T5, etc. dans tout le fichier
+            # 3. EXTRACTION OUTILS (Format: T1+T5+T8)
             raw_tools = re.findall(r'\bT(\d+)\b', content, re.IGNORECASE)
             if raw_tools:
-                # Conversion en entiers pour éliminer les doublons et trier numériquement (T1, T2, T5, T10)
-                unique_tool_nums = sorted(list(set(int(t) for t in raw_tools)))
-                tools = [f"T{num}" for num in unique_tool_nums]
+                unique_tools = sorted(list(set(int(t) for t in raw_tools)))
+                tools = [f"T{num}" for num in unique_tools]
 
-            # --- 4. CALCUL DU TEMPS ---
-            time_match = re.search(r'TIME\s*=\s*(\d+)', full_header_text, re.IGNORECASE)
-            if time_match:
-                total_time_seconds = float(time_match.group(1))
-            else:
-                total_time_seconds = len(lines) * 0.8
+            # 4. ESTIMATION DU TEMPS
+            sec_100 = self.estimate_machining_time(content)
 
-        except Exception as e:
+        except Exception:
             model_name = os.path.splitext(filename)[0]
-            prog_name = "N/A"
+            sec_100 = 0.0
 
-        # Assemblage sous la forme T1+T5+T8
         tools_str = "+".join(tools) if tools else "N/A"
-        return model_name, prog_name, tools_str, total_time_seconds
+        return model_name, prog_name, tools_str, sec_100
 
     @staticmethod
     def format_time(seconds):
@@ -200,6 +271,7 @@ class CNCAnalyzerApp:
             self.tree.delete(row)
 
         idx = 1
+        # Scanner ABSOLUMENT TOUS LES FICHIERS (avec/sans extension, .bat, etc.)
         for root_dir, _, files in os.walk(folder):
             for file in files:
                 filepath = os.path.join(root_dir, file)
@@ -215,7 +287,7 @@ class CNCAnalyzerApp:
                     "sec_70": sec_70,
                     "time_100_str": self.format_time(sec_100),
                     "time_70_str": self.format_time(sec_70),
-                    "filename": file
+                    "filepath": filepath
                 }
                 self.all_data.append(item)
                 idx += 1
@@ -238,10 +310,9 @@ class CNCAnalyzerApp:
 
                 match_model = fnmatch.fnmatch(item["model"].lower(), pattern)
                 match_prog = fnmatch.fnmatch(item["program"].lower(), pattern)
-                match_file = fnmatch.fnmatch(item["filename"].lower(), pattern)
                 match_tools = fnmatch.fnmatch(item["tools"].lower(), pattern)
 
-                if not (match_model or match_prog or match_file or match_tools):
+                if not (match_model or match_prog or match_tools):
                     continue
 
             self.tree.insert(
@@ -254,9 +325,24 @@ class CNCAnalyzerApp:
                     item["tools"],
                     item["time_100_str"],
                     item["time_70_str"]
-                )
+                ),
+                tags=(item["filepath"],)
             )
             display_idx += 1
+
+    def open_in_notepad(self, event):
+        selected_item = self.tree.selection()
+        if not selected_item:
+            return
+
+        tags = self.tree.item(selected_item[0], "tags")
+        if tags:
+            filepath = tags[0]
+            if os.path.exists(filepath):
+                try:
+                    subprocess.Popen(["notepad.exe", filepath])
+                except Exception as e:
+                    messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{e}")
 
     def sort_column(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
