@@ -9,8 +9,10 @@ jobs:
       with:
         python-version: '3.10'
     - run: pip install pyinstaller
-    - run: pyinstaller --noconsole --onefile CNC_Manager.py
+    - name: Compile EXE
+      run: |
+        Get-ChildItem -Filter *.py* | ForEach-Object { pyinstaller --noconsole --onefile $_.Name }
     - uses: actions/upload-artifact@v4
       with:
         name: CNC_Manager_EXE
-        path: dist/CNC_Manager.exe
+        path: dist/*.exe
