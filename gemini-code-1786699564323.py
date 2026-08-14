@@ -7,7 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 # ==========================================
 # METADONNÉES DE L'APPLICATION
 # ==========================================
-APP_NAME = "CNC Program Manager & Time Estimator"
+APP_NAME = "CNC Manager"
 APP_VERSION = "v1.0.0"
 APP_AUTHOR = "Bouzaien Dhaou"
 APP_DATE = "Août 2026"
@@ -20,10 +20,10 @@ class CNCAnalyzerApp:
         self.root.geometry("1050x650")
         self.root.minsize(800, 500)
 
-        # Structure de données
+        # Structure de données globale
         self.all_data = []
 
-        # Construction de l'interface
+        # Construction de l'interface graphique
         self._create_header()
         self._create_toolbar()
         self._create_treeview()
@@ -36,7 +36,7 @@ class CNCAnalyzerApp:
         title_lbl = ttk.Label(
             header_frame,
             text=APP_NAME,
-            font=("Arial", 14, "bold")
+            font=("Arial", 16, "bold")
         )
         title_lbl.pack(side=tk.LEFT)
 
@@ -49,7 +49,7 @@ class CNCAnalyzerApp:
         )
         meta_lbl.pack(side=tk.RIGHT)
 
-        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10, pady=(5, 0))
 
     def _create_toolbar(self):
         toolbar = ttk.Frame(self.root, padding=10)
@@ -62,11 +62,11 @@ class CNCAnalyzerApp:
         )
         btn_browse.pack(side=tk.LEFT, padx=(0, 15))
 
-        ttk.Label(toolbar, text="Recherche (ex: *21* ou PAD*) :").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(toolbar, text="Rechercher :").pack(side=tk.LEFT, padx=(0, 5))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.filter_data())
         
-        search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=30)
+        search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=35)
         search_entry.pack(side=tk.LEFT, padx=(0, 10))
 
         self.lbl_folder = ttk.Label(
@@ -91,10 +91,10 @@ class CNCAnalyzerApp:
         self.tree.heading("time_100", text="Temps (100%)", command=lambda: self.sort_column("time_100", False))
         self.tree.heading("time_70", text="Temps NUM 1060 (70%)", command=lambda: self.sort_column("time_70", False))
 
-        self.tree.column("index", width=50, anchor=tk.CENTER)
+        self.tree.column("index", width=60, anchor=tk.CENTER)
         self.tree.column("model", width=260, anchor=tk.W)
-        self.tree.column("program", width=110, anchor=tk.CENTER)
-        self.tree.column("tools", width=180, anchor=tk.W)
+        self.tree.column("program", width=120, anchor=tk.CENTER)
+        self.tree.column("tools", width=200, anchor=tk.W)
         self.tree.column("time_100", width=130, anchor=tk.CENTER)
         self.tree.column("time_70", width=160, anchor=tk.CENTER)
 
@@ -118,54 +118,65 @@ class CNCAnalyzerApp:
         )
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def parse_cnc_file(self, filepath):
-        model_name = "Inconnu"
-        prog_name = "Inconnu"
+    def parse_cnc_file(self, filepath, filename):
+        model_name = ""
+        prog_name = ""
         tools = []
         total_time_seconds = 0.0
 
         try:
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = [f.readline() for _ in range(15)]
+                content = f.read()
 
-            full_header_text = "".join(lines)
+            lines = content.splitlines()
+            header_lines = lines[:25]
+            full_header_text = "\n".join(header_lines)
 
-            prog_match = re.search(r'\$PAIN\s+([A-Za-z0-9]+)', full_header_text)
+            # --- 1. EXTRACTION N° PROGRAMME ---
+            prog_match = re.search(r'\$PAIN\s+([A-Za-z0-9_\-]+)', full_header_text, re.IGNORECASE)
+            if not prog_match:
+                prog_match = re.search(r'%([A-Za-z0-9_\-]+)', full_header_text)
+            if not prog_match:
+                prog_match = re.search(r'\b(O\d{4,5})\b', full_header_text, re.IGNORECASE)
+
             if prog_match:
                 prog_name = prog_match.group(1)
-
-            model_match = re.search(r'([A-Za-z0-9_\-\']+(?:PAD|BOARD|MOULE)[A-Za-z0-9_\-\']*)', full_header_text, re.IGNORECASE)
-            if not model_match:
-                for line in lines:
-                    if "$PAIN" in line:
-                        parts = line.split()
-                        for p in parts:
-                            if "-" in p or "'" in p:
-                                model_name = p
-                                break
             else:
+                prog_name = os.path.splitext(filename)[0]
+
+            # --- 2. EXTRACTION NOM DU MODÈLE ---
+            model_match = re.search(r'([A-Za-z0-9_\-\']+(?:PAD|BOARD|MOULE|SURF|SKIL|PADDEL)[A-Za-z0-9_\-\']*)', full_header_text, re.IGNORECASE)
+            if model_match:
                 model_name = model_match.group(1)
-
-            tool_matches = re.findall(r'(T\d+)\s+D\d+\s+M6', full_header_text)
-            if tool_matches:
-                seen = set()
-                tools = [t for t in tool_matches if not (t in seen or seen.add(t))]
             else:
-                tools_alt = re.findall(r'\b(T\d+)\b', full_header_text)
-                seen = set()
-                tools = [t for t in tools_alt if not (t in seen or seen.add(t))]
+                for line in header_lines:
+                    clean_line = line.strip().lstrip('(%#$* ;')
+                    if clean_line and not clean_line.startswith('G') and not clean_line.startswith('M') and len(clean_line) > 2:
+                        model_name = clean_line[:35].strip()
+                        break
+            if not model_name:
+                model_name = os.path.splitext(filename)[0]
 
+            # --- 3. BALAYAGE COMPLET DU FICHIER POUR LES OUTILS (T1+T5+T8...) ---
+            # Recherche de toutes les occurrences T1, T01, T5, etc. dans tout le fichier
+            raw_tools = re.findall(r'\bT(\d+)\b', content, re.IGNORECASE)
+            if raw_tools:
+                # Conversion en entiers pour éliminer les doublons et trier numériquement (T1, T2, T5, T10)
+                unique_tool_nums = sorted(list(set(int(t) for t in raw_tools)))
+                tools = [f"T{num}" for num in unique_tool_nums]
+
+            # --- 4. CALCUL DU TEMPS ---
             time_match = re.search(r'TIME\s*=\s*(\d+)', full_header_text, re.IGNORECASE)
             if time_match:
                 total_time_seconds = float(time_match.group(1))
             else:
-                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f_full:
-                    line_count = sum(1 for _ in f_full)
-                total_time_seconds = line_count * 0.8
+                total_time_seconds = len(lines) * 0.8
 
         except Exception as e:
-            print(f"Erreur de lecture {filepath}: {e}")
+            model_name = os.path.splitext(filename)[0]
+            prog_name = "N/A"
 
+        # Assemblage sous la forme T1+T5+T8
         tools_str = "+".join(tools) if tools else "N/A"
         return model_name, prog_name, tools_str, total_time_seconds
 
@@ -183,29 +194,31 @@ class CNCAnalyzerApp:
             return
 
         self.lbl_folder.config(text=folder, foreground="black")
-        self.all_data.clear()
-
-        files = [f for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f))]
         
-        idx = 1
-        for file in files:
-            filepath = os.path.join(folder, file)
-            model, prog, tools, sec_100 = self.parse_cnc_file(filepath)
-            sec_70 = sec_100 / 0.70 if sec_100 > 0 else 0
+        self.all_data.clear()
+        for row in self.tree.get_children():
+            self.tree.delete(row)
 
-            item = {
-                "raw_index": idx,
-                "model": model,
-                "program": prog,
-                "tools": tools,
-                "sec_100": sec_100,
-                "sec_70": sec_70,
-                "time_100_str": self.format_time(sec_100),
-                "time_70_str": self.format_time(sec_70),
-                "filename": file
-            }
-            self.all_data.append(item)
-            idx += 1
+        idx = 1
+        for root_dir, _, files in os.walk(folder):
+            for file in files:
+                filepath = os.path.join(root_dir, file)
+                model, prog, tools, sec_100 = self.parse_cnc_file(filepath, file)
+                sec_70 = sec_100 / 0.70 if sec_100 > 0 else 0
+
+                item = {
+                    "raw_index": idx,
+                    "model": model,
+                    "program": prog,
+                    "tools": tools,
+                    "sec_100": sec_100,
+                    "sec_70": sec_70,
+                    "time_100_str": self.format_time(sec_100),
+                    "time_70_str": self.format_time(sec_70),
+                    "filename": file
+                }
+                self.all_data.append(item)
+                idx += 1
 
         self.filter_data()
         self.statusbar.config(text=f" {len(self.all_data)} fichier(s) chargé(s) depuis : {folder}")
@@ -226,8 +239,9 @@ class CNCAnalyzerApp:
                 match_model = fnmatch.fnmatch(item["model"].lower(), pattern)
                 match_prog = fnmatch.fnmatch(item["program"].lower(), pattern)
                 match_file = fnmatch.fnmatch(item["filename"].lower(), pattern)
+                match_tools = fnmatch.fnmatch(item["tools"].lower(), pattern)
 
-                if not (match_model or match_prog or match_file):
+                if not (match_model or match_prog or match_file or match_tools):
                     continue
 
             self.tree.insert(
@@ -247,13 +261,14 @@ class CNCAnalyzerApp:
     def sort_column(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         
+        def parse_val(v):
+            nums = re.findall(r'\d+', str(v))
+            return int(nums[0]) if nums else 0
+
         if col in ("index", "time_100", "time_70"):
-            try:
-                l.sort(key=lambda t: int(re.sub(r'\D', '', t[0])), reverse=reverse)
-            except ValueError:
-                l.sort(reverse=reverse)
+            l.sort(key=lambda t: parse_val(t[0]), reverse=reverse)
         else:
-            l.sort(reverse=reverse)
+            l.sort(key=lambda t: str(t[0]).lower(), reverse=reverse)
 
         for index, (val, k) in enumerate(l):
             self.tree.move(k, '', index)
