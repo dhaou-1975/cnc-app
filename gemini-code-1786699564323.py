@@ -1,368 +1,681 @@
 import os
 import re
-import math
+import sys
+import sqlite3
 import fnmatch
 import subprocess
+from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox, filedialog
+
+# Importation de pandas et openpyxl pour le traitement Excel
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 # ==========================================
-# METADONNÉES DE L'APPLICATION
+# METADONNÉES & CONFIGURATION BDD
 # ==========================================
-APP_NAME = "CNC Manager"
-APP_VERSION = "v1.0.0"
-APP_AUTHOR = "Bouzaien Dhaou"
-APP_DATE = "Août 2026"
+APP_NAME = "CNC Manager - ERP Ateliers Windsurf"
+APP_VERSION = "v3.0.0 (GitHub Build Auto)"
+DB_FILE = "cnc_factory.db"
 
 
-class CNCAnalyzerApp:
-    def __init__(self, root):
+def init_db():
+    """ Initialise la base de données SQLite """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    # Table Utilisateurs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL
+        )
+    ''')
+
+    # Table Catalogue Modèles
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS models_catalog (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_name TEXT NOT NULL,
+            program_name TEXT NOT NULL,
+            block_dim TEXT,
+            block_dim_bought TEXT,
+            qty_per_block TEXT,
+            z_between_boards TEXT,
+            tools TEXT,
+            caisson TEXT,
+            plaque_gamma TEXT,
+            plaque_beta TEXT,
+            remarks TEXT
+        )
+    ''')
+
+    # Table Historique Usinage Opérateur
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS machining_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operator_username TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            program_name TEXT NOT NULL,
+            block_num TEXT NOT NULL,
+            block_date TEXT NOT NULL,
+            block_density TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Création des comptes par défaut si la table est vide
+    cursor.execute("SELECT count(*) FROM users")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'ADMIN')")
+        cursor.execute("INSERT INTO users (username, password, role) VALUES ('op1', '1234', 'OPERATEUR')")
+
+    conn.commit()
+    conn.close()
+
+
+# ==========================================
+# FENÊTRE DE CONNEXION (LOGIN)
+# ==========================================
+class LoginDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Authentification - CNC Manager")
+        self.geometry("380x230")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self.user_data = None
+
+        ttk.Label(self, text="Connexion Atelier CNC", font=("Arial", 14, "bold")).pack(pady=10)
+
+        frame = ttk.Frame(self, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Nom d'utilisateur :").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.ent_user = ttk.Entry(frame)
+        self.ent_user.grid(row=0, column=1, sticky=tk.EW, pady=5)
+        self.ent_user.focus()
+
+        ttk.Label(frame, text="Mot de passe :").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.ent_pass = ttk.Entry(frame, show="*")
+        self.ent_pass.grid(row=1, column=1, sticky=tk.EW, pady=5)
+
+        btn_box = ttk.Frame(self, padding=10)
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="Se Connecter", command=self.check_login).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_box, text="Quitter", command=self.master.destroy).pack(side=tk.RIGHT)
+
+        self.bind('<Return>', lambda event: self.check_login())
+
+    def check_login(self):
+        user = self.ent_user.get().strip()
+        pwd = self.ent_pass.get().strip()
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT username, role FROM users WHERE username=? AND password=?", (user, pwd))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            self.user_data = {"username": row[0], "role": row[1]}
+            self.destroy()
+        else:
+            messagebox.showerror("Erreur", "Identifiant ou mot de passe incorrect.")
+
+
+# ==========================================
+# DIALOGUES D'ADMINISTRATION
+# ==========================================
+class UserManagementDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Gestion des Utilisateurs")
+        self.geometry("500x350")
+        self.grab_set()
+
+        ttk.Label(self, text="Comptes Utilisateurs", font=("Arial", 12, "bold")).pack(pady=5)
+
+        frame_list = ttk.Frame(self, padding=5)
+        frame_list.pack(fill=tk.BOTH, expand=True)
+
+        self.tree_users = ttk.Treeview(frame_list, columns=("id", "username", "role"), show="headings")
+        self.tree_users.heading("id", text="ID")
+        self.tree_users.heading("username", text="Utilisateur")
+        self.tree_users.heading("role", text="Rôle")
+        self.tree_users.column("id", width=50, anchor=tk.CENTER)
+        self.tree_users.pack(fill=tk.BOTH, expand=True)
+
+        frame_form = ttk.Frame(self, padding=10)
+        frame_form.pack(fill=tk.X)
+
+        ttk.Label(frame_form, text="Nom:").grid(row=0, column=0, padx=2)
+        self.ent_u = ttk.Entry(frame_form, width=12)
+        self.ent_u.grid(row=0, column=1, padx=2)
+
+        ttk.Label(frame_form, text="Pswd:").grid(row=0, column=2, padx=2)
+        self.ent_p = ttk.Entry(frame_form, width=12, show="*")
+        self.ent_p.grid(row=0, column=3, padx=2)
+
+        ttk.Label(frame_form, text="Rôle:").grid(row=0, column=4, padx=2)
+        self.cmb_r = ttk.Combobox(frame_form, values=["OPERATEUR", "ADMIN"], width=10, state="readonly")
+        self.cmb_r.set("OPERATEUR")
+        self.cmb_r.grid(row=0, column=5, padx=2)
+
+        ttk.Button(frame_form, text="➕ Ajouter", command=self.add_user).grid(row=0, column=6, padx=5)
+
+        self.load_users()
+
+    def load_users(self):
+        for item in self.tree_users.get_children():
+            self.tree_users.delete(item)
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, username, role FROM users")
+        for row in cursor.fetchall():
+            self.tree_users.insert("", tk.END, values=row)
+        conn.close()
+
+    def add_user(self):
+        u = self.ent_u.get().strip()
+        p = self.ent_p.get().strip()
+        r = self.cmb_r.get()
+
+        if not u or not p:
+            messagebox.showwarning("Erreur", "Tous les champs sont requis.")
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (u, p, r))
+            conn.commit()
+            messagebox.showinfo("Succès", f"Utilisateur {u} ajouté.")
+            self.load_users()
+            self.ent_u.delete(0, tk.END)
+            self.ent_p.delete(0, tk.END)
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Erreur", "Ce nom d'utilisateur existe déjà.")
+        finally:
+            conn.close()
+
+
+class AddEditModelDialog(tk.Toplevel):
+    def __init__(self, parent, model_id=None):
+        super().__init__(parent)
+        self.model_id = model_id
+        self.title("Nouveau Modèle" if not model_id else f"Modifier Modèle N°{model_id}")
+        self.geometry("450x520")
+        self.grab_set()
+
+        frame = ttk.Frame(self, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        fields = [
+            ("Nom Modèle *", "model_name"),
+            ("Nom Programme Pain *", "program_name"),
+            ("Dimension Bloc", "block_dim"),
+            ("Dimension Bloc (Acheté)", "block_dim_bought"),
+            ("Qté par Bloc", "qty_per_block"),
+            ("Z entre 2 Pains", "z_between_boards"),
+            ("Outils", "tools"),
+            ("Caisson", "caisson"),
+            ("Plaque Gamma", "plaque_gamma"),
+            ("Plaque Beta", "plaque_beta"),
+            ("Remarques", "remarks")
+        ]
+
+        self.entries = {}
+        for idx, (label, key) in enumerate(fields):
+            ttk.Label(frame, text=label).grid(row=idx, column=0, sticky=tk.W, pady=3)
+            ent = ttk.Entry(frame, width=30)
+            ent.grid(row=idx, column=1, sticky=tk.EW, pady=3)
+            self.entries[key] = ent
+
+        ttk.Button(frame, text="Enregistrer", command=self.save_model).grid(row=len(fields), column=1, pady=15, sticky=tk.E)
+
+        if self.model_id:
+            self.load_model_data()
+
+    def load_model_data(self):
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks FROM models_catalog WHERE id=?", (self.model_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            keys = ["model_name", "program_name", "block_dim", "block_dim_bought", "qty_per_block", "z_between_boards", "tools", "caisson", "plaque_gamma", "plaque_beta", "remarks"]
+            for k, val in zip(keys, row):
+                if val:
+                    self.entries[k].insert(0, str(val))
+
+    def save_model(self):
+        vals = {k: self.entries[k].get().strip() for k in self.entries}
+
+        if not vals["model_name"] or not vals["program_name"]:
+            messagebox.showwarning("Erreur", "Le nom du modèle et du programme sont obligatoires.")
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        if not self.model_id:
+            cursor.execute('''
+                INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', tuple(vals.values()))
+        else:
+            cursor.execute('''
+                UPDATE models_catalog SET model_name=?, program_name=?, block_dim=?, block_dim_bought=?, qty_per_block=?, z_between_boards=?, tools=?, caisson=?, plaque_gamma=?, plaque_beta=?, remarks=?
+                WHERE id=?
+            ''', (*vals.values(), self.model_id))
+
+        conn.commit()
+        conn.close()
+        messagebox.showinfo("Succès", "Modèle enregistré.")
+        self.master.load_catalog_data()
+        self.destroy()
+
+
+# ==========================================
+# APPLICATION PRINCIPALE
+# ==========================================
+class CNCManagerApp:
+    def __init__(self, root, current_user):
         self.root = root
-        self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("1100x680")
-        self.root.minsize(850, 520)
+        self.user = current_user
+        self.root.title(f"{APP_NAME} - Connecté : {self.user['username']} [{self.user['role']}]")
+        self.root.geometry("1280x750")
 
-        self.all_data = []
+        self.red_flagged_items = set()
+        self.work_list = []
 
+        self._create_menu()
         self._create_header()
         self._create_toolbar()
-        self._create_treeview()
+        self._create_notebook()
         self._create_statusbar()
+
+        self.load_catalog_data()
+
+    def _create_menu(self):
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Importer Fichier Excel...", command=self.import_excel)
+        file_menu.add_command(label="Actualiser", command=self.load_catalog_data)
+        file_menu.add_separator()
+        file_menu.add_command(label="Quitter", command=self.root.quit)
+        menubar.add_cascade(label="Fichier", menu=file_menu)
+
+        if self.user['role'] == 'ADMIN':
+            admin_menu = tk.Menu(menubar, tearoff=0)
+            admin_menu.add_command(label="Gestion Utilisateurs", command=lambda: UserManagementDialog(self.root))
+            admin_menu.add_command(label="Nouveau Modèle", command=lambda: AddEditModelDialog(self))
+            menubar.add_cascade(label="Administration", menu=admin_menu)
+
+        self.root.config(menu=menubar)
 
     def _create_header(self):
         header_frame = ttk.Frame(self.root, padding=10)
         header_frame.pack(fill=tk.X)
 
-        title_lbl = ttk.Label(
-            header_frame,
-            text=APP_NAME,
-            font=("Arial", 16, "bold")
-        )
-        title_lbl.pack(side=tk.LEFT)
+        ttk.Label(header_frame, text=APP_NAME, font=("Arial", 16, "bold")).pack(side=tk.LEFT)
+        user_info = f"Opérateur : {self.user['username']} | Rôle : {self.user['role']}"
+        ttk.Label(header_frame, text=user_info, font=("Arial", 10, "italic"), foreground="blue").pack(side=tk.RIGHT)
 
-        meta_text = f"Version: {APP_VERSION}  |  Auteur: {APP_AUTHOR}  |  Date: {APP_DATE}"
-        meta_lbl = ttk.Label(
-            header_frame,
-            text=meta_text,
-            font=("Arial", 9, "italic"),
-            foreground="gray"
-        )
-        meta_lbl.pack(side=tk.RIGHT)
-
-        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10, pady=(5, 0))
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
 
     def _create_toolbar(self):
         toolbar = ttk.Frame(self.root, padding=10)
         toolbar.pack(fill=tk.X)
 
-        btn_browse = ttk.Button(
-            toolbar,
-            text="📁 Choisir un dossier...",
-            command=self.browse_folder
-        )
-        btn_browse.pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Button(toolbar, text="📥 Importer Excel", command=self.import_excel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="🔄 Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(toolbar, text="Rechercher :").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(toolbar, text="Recherche dynamique (*PAD*, 21*, etc.) :").pack(side=tk.LEFT, padx=(15, 5))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.filter_data())
-        
-        search_entry = ttk.Entry(toolbar, textvariable=self.search_var, width=35)
-        search_entry.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Entry(toolbar, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=5)
 
-        self.lbl_folder = ttk.Label(
-            toolbar,
-            text="Aucun dossier sélectionné",
-            font=("Arial", 9, "italic"),
-            foreground="gray"
-        )
-        self.lbl_folder.pack(side=tk.LEFT, padx=(10, 0))
+    def _create_notebook(self):
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-    def _create_treeview(self):
-        table_frame = ttk.Frame(self.root, padding=10)
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        # Onglet Catalogue
+        self.tab_catalog = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_catalog, text="📋 Catalogue Modèles")
+        self._setup_catalog_tree(self.tab_catalog)
 
-        columns = ("index", "model", "program", "tools", "time_100", "time_70")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        # Onglet Poste Opérateur
+        self.tab_work = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_work, text="🛠️ Ordre de Fabrication")
+        self._setup_work_tree(self.tab_work)
 
-        self.tree.heading("index", text="N°", command=lambda: self.sort_column("index", False))
-        self.tree.heading("model", text="Nom du Modèle", command=lambda: self.sort_column("model", False))
-        self.tree.heading("program", text="N° Programme (Fichier)", command=lambda: self.sort_column("program", False))
-        self.tree.heading("tools", text="Outils (T...)", command=lambda: self.sort_column("tools", False))
-        self.tree.heading("time_100", text="Temps (100%)", command=lambda: self.sort_column("time_100", False))
-        self.tree.heading("time_70", text="Temps NUM 1060 (70%)", command=lambda: self.sort_column("time_70", False))
+        # Onglet Historique
+        self.tab_history = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_history, text="📜 Historique Usinages")
+        self._setup_history_tree(self.tab_history)
 
-        self.tree.column("index", width=50, anchor=tk.CENTER)
-        self.tree.column("model", width=250, anchor=tk.W)
-        self.tree.column("program", width=200, anchor=tk.W)
-        self.tree.column("tools", width=180, anchor=tk.W)
-        self.tree.column("time_100", width=130, anchor=tk.CENTER)
-        self.tree.column("time_70", width=160, anchor=tk.CENTER)
+    def _setup_catalog_tree(self, parent):
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-        # Style pour la sélection verte
-        style = ttk.Style()
-        style.theme_use("default")
-        style.map("Treeview",
-                  background=[('selected', '#2ecc71')],  # Vert clair
-                  foreground=[('selected', '#ffffff')])  # Texte blanc
+        columns = ("id", "model", "program", "dim_block", "qty", "z_between", "tools", "caisson", "p_gamma", "p_beta", "remarks")
+        self.tree_cat = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
 
-        vsb = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        headings = {
+            "id": ("N°", 40),
+            "model": ("Nom Modèle", 140),
+            "program": ("Programme Pain", 140),
+            "dim_block": ("Dim. Bloc", 160),
+            "qty": ("Qté/Bloc", 65),
+            "z_between": ("Z entre 2", 70),
+            "tools": ("Outils", 110),
+            "caisson": ("Caisson", 60),
+            "p_gamma": ("Plaque Gamma", 80),
+            "p_beta": ("Plaque Beta", 80),
+            "remarks": ("Remarques", 150)
+        }
 
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
+        for col, (text, width) in headings.items():
+            self.tree_cat.heading(col, text=text)
+            self.tree_cat.column(col, width=width, anchor=tk.CENTER if width < 100 else tk.W)
 
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
+        self.tree_cat.tag_configure('red_flag', background='#ff7675', foreground='white')
 
-        # Double-clic pour ouvrir dans le Bloc-notes
-        self.tree.bind("<Double-1>", self.open_in_notepad)
+        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree_cat.yview)
+        hsb = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
+        self.tree_cat.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree_cat.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.tree_cat.bind("<Button-3>", self.show_context_menu)
+        self.tree_cat.bind("<Double-1>", lambda e: self.add_selected_to_worklist())
+
+        btn_bar = ttk.Frame(parent, padding=5)
+        btn_bar.pack(fill=tk.X)
+        ttk.Button(btn_bar, text="➕ Ajouter la sélection à ma Liste de Travail", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
+
+    def _setup_work_tree(self, parent):
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("model", "program", "block_num", "block_date", "block_density")
+        self.tree_work = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+
+        self.tree_work.heading("model", text="Nom du Modèle")
+        self.tree_work.heading("program", text="Programme Pain")
+        self.tree_work.heading("block_num", text="N° du Bloc Matière")
+        self.tree_work.heading("block_date", text="Date Réception")
+        self.tree_work.heading("block_density", text="Densité (kg/m³)")
+
+        self.tree_work.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        btn_bar = ttk.Frame(parent, padding=10)
+        btn_bar.pack(fill=tk.X)
+
+        ttk.Button(btn_bar, text="📝 Renseigner Infos Bloc Matière", command=self.edit_block_info).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_bar, text="❌ Retirer de la liste", command=self.remove_from_worklist).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_bar, text="✅ Valider & Enregistrer Usinage", command=self.validate_worklist).pack(side=tk.RIGHT, padx=5)
+
+    def _setup_history_tree(self, parent):
+        frame = ttk.Frame(parent, padding=5)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("id", "op", "model", "program", "block", "date", "density", "timestamp")
+        self.tree_hist = ttk.Treeview(frame, columns=columns, show="headings")
+
+        self.tree_hist.heading("id", text="N°")
+        self.tree_hist.heading("op", text="Opérateur")
+        self.tree_hist.heading("model", text="Modèle")
+        self.tree_hist.heading("program", text="Programme")
+        self.tree_hist.heading("block", text="N° Bloc Matière")
+        self.tree_hist.heading("date", text="Date Bloc")
+        self.tree_hist.heading("density", text="Densité")
+        self.tree_hist.heading("timestamp", text="Horodatage Validation")
+
+        self.tree_hist.pack(fill=tk.BOTH, expand=True)
 
     def _create_statusbar(self):
-        self.statusbar = ttk.Label(
-            self.root,
-            text=" Prêt.",
-            relief=tk.SUNKEN,
-            anchor=tk.W
-        )
+        self.statusbar = ttk.Label(self.root, text=" Prêt.", relief=tk.SUNKEN, anchor=tk.W)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def estimate_machining_time(self, content):
-        """
-        Estimation cinématique du temps d'usinage
-        Prend en compte l'avance F, le profil d'accélération et les rapides G0.
-        """
-        lines = content.splitlines()
-        total_seconds = 0.0
-        
-        curr_x, curr_y, curr_z = 0.0, 0.0, 0.0
-        feed_rate = 5000.0  # mm/min par défaut
-        g_mode = "G1"
-        rapid_rate = 15000.0  # mm/min pour G0 (NUM 1060)
-
-        g_code_pattern = re.compile(r'([GXYZF])\s*([\-\+]?\d+\.?\d*)', re.IGNORECASE)
-
-        for line in lines:
-            line_clean = line.split(';')[0].split('(')[0].strip()
-            if not line_clean:
-                continue
-
-            matches = g_code_pattern.findall(line_clean)
-            if not matches:
-                continue
-
-            new_x, new_y, new_z = curr_x, curr_y, curr_z
-            has_motion = False
-
-            for cmd, val in matches:
-                cmd = cmd.upper()
-                v = float(val)
-
-                if cmd == 'G':
-                    g_num = int(v)
-                    if g_num == 0:
-                        g_mode = "G0"
-                    elif g_num in (1, 2, 3):
-                        g_mode = "G1"
-                elif cmd == 'F':
-                    if v > 0:
-                        feed_rate = v
-                elif cmd == 'X':
-                    new_x = v
-                    has_motion = True
-                elif cmd == 'Y':
-                    new_y = v
-                    has_motion = True
-                elif cmd == 'Z':
-                    new_z = v
-                    has_motion = True
-
-            if has_motion:
-                dist = math.sqrt((new_x - curr_x)**2 + (new_y - curr_y)**2 + (new_z - curr_z)**2)
-                if dist > 0:
-                    speed = rapid_rate if g_mode == "G0" else feed_rate
-                    if speed <= 0:
-                        speed = 3000.0
-                    
-                    time_min = dist / speed
-                    time_sec = time_min * 60.0
-                    
-                    # Pénalité d'accélération/décélération pour micro-segments
-                    if dist < 5.0 and g_mode == "G1":
-                        time_sec *= 1.35
-                    
-                    total_seconds += time_sec
-
-                curr_x, curr_y, curr_z = new_x, new_y, new_z
-
-        return max(total_seconds, len(lines) * 0.15)
-
-    def parse_cnc_file(self, filepath, filename):
-        # 1. NOM DU PROGRAMME = NOM DU FICHIER
-        prog_name = filename
-        model_name = ""
-        tools = []
-
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-
-            lines = content.splitlines()
-
-            # 2. EXTRACTION NOM DU MODÈLE DEPUIS $PAIN
-            for line in lines[:30]:
-                if "$PAIN" in line.upper():
-                    # Exemple: "$PAIN 0021A PAD-10'6F" -> extraire "PAD-10'6F"
-                    match = re.search(r'\$PAIN\s+\S+\s+(.+)', line, re.IGNORECASE)
-                    if match:
-                        model_name = match.group(1).strip()
-                        break
-                    else:
-                        parts = line.strip().split()
-                        if len(parts) >= 3:
-                            model_name = " ".join(parts[2:]).strip()
-                            break
-
-            # Repli si pas de $PAIN explicite
-            if not model_name:
-                for line in lines[:25]:
-                    clean_line = line.strip().lstrip('(%#$* ;')
-                    if clean_line and not clean_line.startswith('G') and not clean_line.startswith('M') and len(clean_line) > 2:
-                        model_name = clean_line[:35].strip()
-                        break
-
-            if not model_name:
-                model_name = os.path.splitext(filename)[0]
-
-            # 3. EXTRACTION OUTILS (Format: T1+T5+T8)
-            raw_tools = re.findall(r'\bT(\d+)\b', content, re.IGNORECASE)
-            if raw_tools:
-                unique_tools = sorted(list(set(int(t) for t in raw_tools)))
-                tools = [f"T{num}" for num in unique_tools]
-
-            # 4. ESTIMATION DU TEMPS
-            sec_100 = self.estimate_machining_time(content)
-
-        except Exception:
-            model_name = os.path.splitext(filename)[0]
-            sec_100 = 0.0
-
-        tools_str = "+".join(tools) if tools else "N/A"
-        return model_name, prog_name, tools_str, sec_100
-
-    @staticmethod
-    def format_time(seconds):
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        if h > 0:
-            return f"{h}h {m:02d}m {s:02d}s"
-        return f"{m:02d}m {s:02d}s"
-
-    def browse_folder(self):
-        folder = filedialog.askdirectory(title="Sélectionner le dossier des fichiers d'usinage")
-        if not folder:
+    def import_excel(self):
+        if not pd:
+            messagebox.showerror("Erreur", "Pandas/Openpyxl n'est pas disponible.")
             return
 
-        self.lbl_folder.config(text=folder, foreground="black")
-        
-        self.all_data.clear()
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        file_path = filedialog.askopenfilename(filetypes=[("Fichiers Excel", "*.xlsx *.xls")])
+        if not file_path:
+            return
 
-        idx = 1
-        # Scanner ABSOLUMENT TOUS LES FICHIERS (avec/sans extension, .bat, etc.)
-        for root_dir, _, files in os.walk(folder):
-            for file in files:
-                filepath = os.path.join(root_dir, file)
-                model, prog, tools, sec_100 = self.parse_cnc_file(filepath, file)
-                sec_70 = sec_100 / 0.70 if sec_100 > 0 else 0
+        try:
+            df = pd.read_excel(file_path)
+            df = df.fillna('')
 
-                item = {
-                    "raw_index": idx,
-                    "model": model,
-                    "program": prog,
-                    "tools": tools,
-                    "sec_100": sec_100,
-                    "sec_70": sec_70,
-                    "time_100_str": self.format_time(sec_100),
-                    "time_70_str": self.format_time(sec_70),
-                    "filepath": filepath
-                }
-                self.all_data.append(item)
-                idx += 1
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
 
-        self.filter_data()
-        self.statusbar.config(text=f" {len(self.all_data)} fichier(s) chargé(s) depuis : {folder}")
+            for _, row in df.iterrows():
+                vals = [str(x).strip() for x in row.values]
+                if len(vals) >= 2:
+                    cursor.execute('''
+                        INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        vals[0], vals[1],
+                        vals[2] if len(vals) > 2 else '',
+                        vals[3] if len(vals) > 3 else '',
+                        vals[4] if len(vals) > 4 else '',
+                        vals[5] if len(vals) > 5 else '',
+                        vals[6] if len(vals) > 6 else '',
+                        vals[7] if len(vals) > 7 else '',
+                        vals[8] if len(vals) > 8 else '',
+                        vals[9] if len(vals) > 9 else '',
+                        vals[10] if len(vals) > 10 else ''
+                    ))
+
+            conn.commit()
+            conn.close()
+            messagebox.showinfo("Succès", "Données Excel importées avec succès !")
+            self.load_catalog_data()
+        except Exception as e:
+            messagebox.showerror("Erreur Importation", f"Erreur lors de la lecture du fichier Excel :\n{e}")
+
+    def load_catalog_data(self):
+        for row in self.tree_cat.get_children():
+            self.tree_cat.delete(row)
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, model_name, program_name, block_dim, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks FROM models_catalog")
+        rows = cursor.fetchall()
+        conn.close()
+
+        for r in rows:
+            item_id = self.tree_cat.insert("", tk.END, values=r)
+            if r[0] in self.red_flagged_items:
+                self.tree_cat.item(item_id, tags=('red_flag',))
+
+        self.load_history_data()
+        self.statusbar.config(text=f" {len(rows)} modèle(s) présent(s) dans le catalogue.")
+
+    def load_history_data(self):
+        for row in self.tree_hist.get_children():
+            self.tree_hist.delete(row)
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, operator_username, model_name, program_name, block_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
+        for r in cursor.fetchall():
+            self.tree_hist.insert("", tk.END, values=r)
+        conn.close()
 
     def filter_data(self):
         query = self.search_var.get().strip()
+        pattern = query.lower()
+        if pattern and not pattern.startswith("*") and not pattern.endswith("*"):
+            pattern = f"*{pattern}*"
 
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        for item in self.tree_cat.get_children():
+            vals = self.tree_cat.item(item, "values")
+            if not query or re.match(fnmatch.translate(pattern), str(vals[1]).lower()) or re.match(fnmatch.translate(pattern), str(vals[2]).lower()):
+                self.tree_cat.reattach(item, "", tk.END)
+            else:
+                self.tree_cat.detach(item)
 
-        display_idx = 1
-        for item in self.all_data:
-            if query:
-                pattern = query.lower()
-                if not pattern.startswith("*") and not pattern.endswith("*"):
-                    pattern = f"*{pattern}*"
+    def show_context_menu(self, event):
+        item = self.tree_cat.identify_row(event.y)
+        if not item:
+            return
+        self.tree_cat.selection_set(item)
 
-                match_model = fnmatch.fnmatch(item["model"].lower(), pattern)
-                match_prog = fnmatch.fnmatch(item["program"].lower(), pattern)
-                match_tools = fnmatch.fnmatch(item["tools"].lower(), pattern)
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="🔴 Marquer/Démarquer en Rouge", command=lambda: self.toggle_red_flag(item))
+        menu.add_command(label="📝 Ouvrir le fichier programme", command=lambda: self.open_program_notepad(item))
 
-                if not (match_model or match_prog or match_tools):
-                    continue
+        if self.user['role'] == 'ADMIN':
+            vals = self.tree_cat.item(item, "values")
+            menu.add_separator()
+            menu.add_command(label="✏️ Modifier ce modèle", command=lambda: AddEditModelDialog(self, model_id=int(vals[0])))
 
-            self.tree.insert(
-                "",
-                tk.END,
-                values=(
-                    display_idx,
-                    item["model"],
-                    item["program"],
-                    item["tools"],
-                    item["time_100_str"],
-                    item["time_70_str"]
-                ),
-                tags=(item["filepath"],)
-            )
-            display_idx += 1
+        menu.post(event.x_root, event.y_root)
 
-    def open_in_notepad(self, event):
-        selected_item = self.tree.selection()
-        if not selected_item:
+    def toggle_red_flag(self, item):
+        vals = self.tree_cat.item(item, "values")
+        db_id = int(vals[0])
+        if db_id in self.red_flagged_items:
+            self.red_flagged_items.remove(db_id)
+            self.tree_cat.item(item, tags=())
+        else:
+            self.red_flagged_items.add(db_id)
+            self.tree_cat.item(item, tags=('red_flag',))
+
+    def open_program_notepad(self, item):
+        vals = self.tree_cat.item(item, "values")
+        prog_name = vals[2]
+        if sys.platform == "win32":
+            try:
+                subprocess.Popen(["notepad.exe", f"{prog_name}.txt"])
+            except Exception:
+                messagebox.showinfo("Programme", f"Programme sélectionné : {prog_name}")
+        else:
+            messagebox.showinfo("Programme", f"Programme sélectionné : {prog_name}")
+
+    def add_selected_to_worklist(self):
+        selected = self.tree_cat.selection()
+        for s in selected:
+            vals = self.tree_cat.item(s, "values")
+            item_data = {
+                "model": vals[1],
+                "program": vals[2],
+                "block_num": "Saisir...",
+                "block_date": datetime.today().strftime('%Y-%m-%d'),
+                "block_density": "28"
+            }
+            self.work_list.append(item_data)
+
+        self.refresh_work_tree()
+        self.notebook.select(self.tab_work)
+
+    def refresh_work_tree(self):
+        for row in self.tree_work.get_children():
+            self.tree_work.delete(row)
+        for item in self.work_list:
+            self.tree_work.insert("", tk.END, values=(
+                item["model"], item["program"], item["block_num"], item["block_date"], item["block_density"]
+            ))
+
+    def edit_block_info(self):
+        selected = self.tree_work.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Sélectionnez un modèle dans votre liste de travail.")
             return
 
-        tags = self.tree.item(selected_item[0], "tags")
-        if tags:
-            filepath = tags[0]
-            if os.path.exists(filepath):
-                try:
-                    subprocess.Popen(["notepad.exe", filepath])
-                except Exception as e:
-                    messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{e}")
+        idx = self.tree_work.index(selected[0])
+        item = self.work_list[idx]
 
-    def sort_column(self, col, reverse):
-        l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-        
-        def parse_val(v):
-            nums = re.findall(r'\d+', str(v))
-            return int(nums[0]) if nums else 0
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Fiche Bloc Matière")
+        dlg.geometry("350x250")
 
-        if col in ("index", "time_100", "time_70"):
-            l.sort(key=lambda t: parse_val(t[0]), reverse=reverse)
-        else:
-            l.sort(key=lambda t: str(t[0]).lower(), reverse=reverse)
+        ttk.Label(dlg, text="N° du Bloc Matière :").pack(pady=2)
+        ent_num = ttk.Entry(dlg)
+        ent_num.insert(0, item["block_num"])
+        ent_num.pack(pady=2)
 
-        for index, (val, k) in enumerate(l):
-            self.tree.move(k, '', index)
+        ttk.Label(dlg, text="Date Réception Bloc :").pack(pady=2)
+        ent_date = ttk.Entry(dlg)
+        ent_date.insert(0, item["block_date"])
+        ent_date.pack(pady=2)
 
-        self.tree.heading(col, command=lambda: self.sort_column(col, not reverse))
+        ttk.Label(dlg, text="Densité du Bloc (kg/m³) :").pack(pady=2)
+        ent_dens = ttk.Entry(dlg)
+        ent_dens.insert(0, item["block_density"])
+        ent_dens.pack(pady=2)
+
+        def save():
+            item["block_num"] = ent_num.get()
+            item["block_date"] = ent_date.get()
+            item["block_density"] = ent_dens.get()
+            self.refresh_work_tree()
+            dlg.destroy()
+
+        ttk.Button(dlg, text="Enregistrer", command=save).pack(pady=10)
+
+    def remove_from_worklist(self):
+        selected = self.tree_work.selection()
+        if selected:
+            idx = self.tree_work.index(selected[0])
+            del self.work_list[idx]
+            self.refresh_work_tree()
+
+    def validate_worklist(self):
+        if not self.work_list:
+            messagebox.showwarning("Attention", "Votre liste de travail est vide.")
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        for item in self.work_list:
+            cursor.execute('''
+                INSERT INTO machining_history (operator_username, model_name, program_name, block_num, block_date, block_density)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (self.user['username'], item['model'], item['program'], item['block_num'], item['block_date'], item['block_density']))
+        conn.commit()
+        conn.close()
+
+        messagebox.showinfo("Succès", "Ordre d'usinage enregistré !")
+        self.work_list.clear()
+        self.refresh_work_tree()
+        self.load_history_data()
 
 
+# ==========================================
+# POINT D'ENTRÉE
+# ==========================================
 if __name__ == "__main__":
+    init_db()
+
     root = tk.Tk()
-    app = CNCAnalyzerApp(root)
-    root.mainloop()
+    root.withdraw()
+
+    login = LoginDialog(root)
+    root.wait_window(login)
+
+    if login.user_data:
+        root.deiconify()
+        app = CNCManagerApp(root, login.user_data)
+        root.mainloop()
+    else:
+        sys.exit(0)
