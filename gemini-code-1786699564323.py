@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import csv
 import sqlite3
@@ -8,16 +7,12 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-# ==========================================
-# METADONNÉES & CONFIGURATION BDD
-# ==========================================
-APP_NAME = "CNC Manager - ERP Ateliers Windsurf"
-APP_VERSION = "v3.2.0"
+APP_NAME = "CNC Manager - Ateliers Windsurf"
+APP_VERSION = "v3.3.0"
 DB_FILE = "cnc_factory.db"
 
 
 def init_db():
-    """ Initialise la base de données SQLite """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -53,6 +48,7 @@ def init_db():
             operator_username TEXT NOT NULL,
             model_name TEXT NOT NULL,
             program_name TEXT NOT NULL,
+            block_dim TEXT NOT NULL,
             block_num TEXT NOT NULL,
             block_date TEXT NOT NULL,
             block_density TEXT NOT NULL,
@@ -73,13 +69,10 @@ def get_user_count():
     return count
 
 
-# ==========================================
-# FENÊTRE DE CONNEXION (LOGIN)
-# ==========================================
 class LoginDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Authentification - CNC Manager")
+        self.title("Authentification")
         self.geometry("380x230")
         self.resizable(False, False)
         self.grab_set()
@@ -124,9 +117,6 @@ class LoginDialog(tk.Toplevel):
             messagebox.showerror("Erreur", "Nom d'utilisateur ou mot de passe incorrect.")
 
 
-# ==========================================
-# GESTION UTILISATEURS (COMPLÈTE)
-# ==========================================
 class UserManagementDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -148,13 +138,11 @@ class UserManagementDialog(tk.Toplevel):
         self.tree_users.column("role", width=200)
         self.tree_users.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Actions d'édition et suppression
         frame_actions = ttk.Frame(frame_list, padding=5)
         frame_actions.pack(side=tk.RIGHT, fill=tk.Y)
         ttk.Button(frame_actions, text="✏️ Modifier", command=self.edit_user).pack(fill=tk.X, pady=5)
         ttk.Button(frame_actions, text="🗑️ Supprimer", command=self.delete_user).pack(fill=tk.X, pady=5)
 
-        # Formulaire d'ajout / modification
         frame_form = ttk.LabelFrame(self, text=" Saisie Utilisateur ", padding=10)
         frame_form.pack(fill=tk.X, padx=10, pady=10)
 
@@ -216,7 +204,6 @@ class UserManagementDialog(tk.Toplevel):
 
         user_id, username, role = self.tree_users.item(selected[0], "values")
 
-        # Vérification si c'est le seul administrateur
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT count(*) FROM users WHERE role='ADMIN'")
@@ -252,7 +239,7 @@ class UserManagementDialog(tk.Toplevel):
         frame = ttk.Frame(dlg, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="Nouveau M.Passe (laisser vide si inchangé) :").grid(row=0, column=0, sticky=tk.W, pady=2)
+        ttk.Label(frame, text="Nouveau M.Passe (si changement) :").grid(row=0, column=0, sticky=tk.W, pady=2)
         ent_new_p = ttk.Entry(frame, show="*")
         ent_new_p.grid(row=1, column=0, sticky=tk.EW, pady=5)
 
@@ -360,9 +347,6 @@ class AddEditModelDialog(tk.Toplevel):
         self.destroy()
 
 
-# ==========================================
-# APPLICATION PRINCIPALE
-# ==========================================
 class CNCManagerApp:
     def __init__(self, root, current_user):
         self.root = root
@@ -385,7 +369,8 @@ class CNCManagerApp:
         menubar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Importer Fichier Excel/CSV...", command=self.import_csv)
+        if self.user['role'] == 'ADMIN':
+            file_menu.add_command(label="Importer Fichier CSV...", command=self.import_csv)
         file_menu.add_command(label="Actualiser", command=self.load_catalog_data)
         file_menu.add_separator()
         file_menu.add_command(label="Quitter", command=self.root.quit)
@@ -413,24 +398,26 @@ class CNCManagerApp:
         toolbar = ttk.Frame(self.root, padding=10)
         toolbar.pack(fill=tk.X)
 
-        ttk.Button(toolbar, text="📥 Importer Fichier (CSV/Excel)", command=self.import_csv).pack(side=tk.LEFT, padx=5)
+        if self.user['role'] == 'ADMIN':
+            ttk.Button(toolbar, text="📥 Importer Fichier (CSV)", command=self.import_csv).pack(side=tk.LEFT, padx=5)
+
         ttk.Button(toolbar, text="🔄 Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
 
-        # RECHERCHE PRO
         ttk.Label(toolbar, text="Rechercher :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.filter_data())
         ttk.Entry(toolbar, textvariable=self.search_var, width=25).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(toolbar, text="Dans la colonne :").pack(side=tk.LEFT, padx=(10, 5))
+        ttk.Label(toolbar, text="Dans :").pack(side=tk.LEFT, padx=(10, 5))
 
+        # CORRECTION ALIGNEMENT DES INDEX DES COLONNES
         self.search_col_map = {
-            "Nom Modèle": 1,
-            "Programme Pain": 2,
-            "Dim. Bloc": 3,
-            "Outils": 6,
-            "Remarques": 10
+            "Nom Modèle": 0,
+            "Programme Pain": 1,
+            "Dim. Bloc": 2,
+            "Outils": 5,
+            "Remarques": 9
         }
 
         self.cmb_search_col = ttk.Combobox(toolbar, values=list(self.search_col_map.keys()), state="readonly", width=18)
@@ -442,30 +429,30 @@ class CNCManagerApp:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # Catalogue
+        # Onglet Catalogue
         self.tab_catalog = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_catalog, text="📋 Catalogue Modèles")
         self._setup_catalog_tree(self.tab_catalog)
 
-        # Poste Opérateur
+        # Onglet Poste Opérateur
         self.tab_work = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_work, text="🛠️ Ordre de Fabrication")
+        self.notebook.add(self.tab_work, text="🛠️ Ordre de Fabrication (Mon Travail du Jour)")
         self._setup_work_tree(self.tab_work)
 
-        # Historique
-        self.tab_history = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_history, text="📜 Historique Usinages")
-        self._setup_history_tree(self.tab_history)
+        # Onglet Historique (EXCLUSIF ADMIN)
+        if self.user['role'] == 'ADMIN':
+            self.tab_history = ttk.Frame(self.notebook)
+            self.notebook.add(self.tab_history, text="📜 Historique Usinages (Admin)")
+            self._setup_history_tree(self.tab_history)
 
     def _setup_catalog_tree(self, parent):
         frame = ttk.Frame(parent, padding=5)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("id", "model", "program", "dim_block", "qty", "z_between", "tools", "caisson", "p_gamma", "p_beta", "remarks")
+        columns = ("model", "program", "dim_block", "qty", "z_between", "tools", "caisson", "p_gamma", "p_beta", "remarks")
         self.tree_cat = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
 
         headings = {
-            "id": ("N°", 40),
             "model": ("Nom Modèle", 140),
             "program": ("Programme Pain", 140),
             "dim_block": ("Dim. Bloc", 160),
@@ -497,17 +484,18 @@ class CNCManagerApp:
 
         btn_bar = ttk.Frame(parent, padding=5)
         btn_bar.pack(fill=tk.X)
-        ttk.Button(btn_bar, text="➕ Ajouter la sélection à ma Liste de Travail", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
+        ttk.Button(btn_bar, text="➕ Ajouter à ma Liste de Travail du Jour", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
 
     def _setup_work_tree(self, parent):
         frame = ttk.Frame(parent, padding=5)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("model", "program", "block_num", "block_date", "block_density")
+        columns = ("model", "program", "block_dim", "block_num", "block_date", "block_density")
         self.tree_work = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
 
         self.tree_work.heading("model", text="Nom du Modèle")
         self.tree_work.heading("program", text="Programme Pain")
+        self.tree_work.heading("block_dim", text="Dimension Bloc")
         self.tree_work.heading("block_num", text="N° du Bloc Matière")
         self.tree_work.heading("block_date", text="Date Réception")
         self.tree_work.heading("block_density", text="Densité (kg/m³)")
@@ -518,24 +506,34 @@ class CNCManagerApp:
         btn_bar.pack(fill=tk.X)
 
         ttk.Button(btn_bar, text="📝 Renseigner Infos Bloc Matière", command=self.edit_block_info).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_bar, text="❌ Retirer de la liste", command=self.remove_from_worklist).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_bar, text="✅ Valider & Enregistrer Usinage", command=self.validate_worklist).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_bar, text="❌ Retirer de la liste du jour", command=self.remove_from_worklist).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_bar, text="✅ Valider & Enregistrer Usinage du Jour", command=self.validate_worklist).pack(side=tk.RIGHT, padx=5)
 
     def _setup_history_tree(self, parent):
+        filter_frame = ttk.Frame(parent, padding=5)
+        filter_frame.pack(fill=tk.X)
+
+        ttk.Label(filter_frame, text="Filtrer Historique :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.hist_filter_var = tk.StringVar()
+        self.hist_filter_var.trace_add("write", lambda *args: self.filter_history_data())
+        ttk.Entry(filter_frame, textvariable=self.hist_filter_var, width=30).pack(side=tk.LEFT, padx=5)
+        ttk.Label(filter_frame, text="(Nom ouvrier, Date YYYY-MM-DD ou Modèle)").pack(side=tk.LEFT, padx=5)
+
         frame = ttk.Frame(parent, padding=5)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("id", "op", "model", "program", "block", "date", "density", "timestamp")
+        columns = ("id", "op", "model", "program", "dim_block", "block", "date", "density", "timestamp")
         self.tree_hist = ttk.Treeview(frame, columns=columns, show="headings")
 
         self.tree_hist.heading("id", text="N°")
         self.tree_hist.heading("op", text="Opérateur")
         self.tree_hist.heading("model", text="Modèle")
         self.tree_hist.heading("program", text="Programme")
-        self.tree_hist.heading("block", text="N° Bloc Matière")
+        self.tree_hist.heading("dim_block", text="Dim. Bloc")
+        self.tree_hist.heading("block", text="N° Bloc")
         self.tree_hist.heading("date", text="Date Bloc")
         self.tree_hist.heading("density", text="Densité")
-        self.tree_hist.heading("timestamp", text="Horodatage Validation")
+        self.tree_hist.heading("timestamp", text="Validation")
 
         self.tree_hist.pack(fill=tk.BOTH, expand=True)
 
@@ -544,7 +542,6 @@ class CNCManagerApp:
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def import_csv(self):
-        """ Importation directe de fichiers CSV (Exposés depuis Excel) """
         file_path = filedialog.askopenfilename(filetypes=[("Fichiers CSV", "*.csv"), ("Tous les fichiers", "*.*")])
         if not file_path:
             return
@@ -554,14 +551,13 @@ class CNCManagerApp:
             cursor = conn.cursor()
             count = 0
 
-            # Détection automatique du séparateur (virgule ou point-virgule)
             with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
                 sample = f.read(2048)
                 delimiter = ';' if ';' in sample else ','
                 f.seek(0)
 
                 reader = csv.reader(f, delimiter=delimiter)
-                header = next(reader, None)  # Sauter l'en-tête
+                next(reader, None)
 
                 for row in reader:
                     if row and len(row) >= 2:
@@ -600,20 +596,27 @@ class CNCManagerApp:
         conn.close()
 
         for r in rows:
-            item_id = self.tree_cat.insert("", tk.END, values=r)
-            if r[0] in self.red_flagged_items:
-                self.tree_cat.item(item_id, tags=('red_flag',))
+            db_id = r[0]
+            display_values = r[1:]
+            item_id = self.tree_cat.insert("", tk.END, values=display_values, tags=(str(db_id),))
+            if db_id in self.red_flagged_items:
+                self.tree_cat.item(item_id, tags=(str(db_id), 'red_flag'))
 
-        self.load_history_data()
+        if self.user['role'] == 'ADMIN':
+            self.load_history_data()
+
         self.statusbar.config(text=f" {len(rows)} modèle(s) présent(s) dans le catalogue.")
 
     def load_history_data(self):
+        if self.user['role'] != 'ADMIN':
+            return
+
         for row in self.tree_hist.get_children():
             self.tree_hist.delete(row)
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, operator_username, model_name, program_name, block_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
+        cursor.execute("SELECT id, operator_username, model_name, program_name, block_dim, block_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
         for r in cursor.fetchall():
             self.tree_hist.insert("", tk.END, values=r)
         conn.close()
@@ -621,7 +624,7 @@ class CNCManagerApp:
     def filter_data(self):
         query = self.search_var.get().strip().lower()
         selected_col_name = self.cmb_search_col.get()
-        col_idx = self.search_col_map.get(selected_col_name, 1)
+        col_idx = self.search_col_map.get(selected_col_name, 0)
 
         for item in self.tree_cat.get_children():
             vals = self.tree_cat.item(item, "values")
@@ -631,6 +634,22 @@ class CNCManagerApp:
                 self.tree_cat.reattach(item, "", tk.END)
             else:
                 self.tree_cat.detach(item)
+
+    def filter_history_data(self):
+        if self.user['role'] != 'ADMIN':
+            return
+
+        query = self.hist_filter_var.get().strip().lower()
+
+        for item in self.tree_hist.get_children():
+            vals = self.tree_hist.item(item, "values")
+            # Opérateur (1), Modèle (2), Date (6)
+            match = query in str(vals[1]).lower() or query in str(vals[2]).lower() or query in str(vals[6]).lower()
+
+            if not query or match:
+                self.tree_hist.reattach(item, "", tk.END)
+            else:
+                self.tree_hist.detach(item)
 
     def show_context_menu(self, event):
         item = self.tree_cat.identify_row(event.y)
@@ -643,25 +662,27 @@ class CNCManagerApp:
         menu.add_command(label="📝 Ouvrir le fichier programme", command=lambda: self.open_program_notepad(item))
 
         if self.user['role'] == 'ADMIN':
-            vals = self.tree_cat.item(item, "values")
+            tags = self.tree_cat.item(item, "tags")
+            db_id = int(tags[0])
             menu.add_separator()
-            menu.add_command(label="✏️ Modifier ce modèle", command=lambda: AddEditModelDialog(self, model_id=int(vals[0])))
+            menu.add_command(label="✏️ Modifier ce modèle", command=lambda: AddEditModelDialog(self, model_id=db_id))
 
         menu.post(event.x_root, event.y_root)
 
     def toggle_red_flag(self, item):
-        vals = self.tree_cat.item(item, "values")
-        db_id = int(vals[0])
+        tags = self.tree_cat.item(item, "tags")
+        db_id = int(tags[0])
+
         if db_id in self.red_flagged_items:
             self.red_flagged_items.remove(db_id)
-            self.tree_cat.item(item, tags=())
+            self.tree_cat.item(item, tags=(str(db_id),))
         else:
             self.red_flagged_items.add(db_id)
-            self.tree_cat.item(item, tags=('red_flag',))
+            self.tree_cat.item(item, tags=(str(db_id), 'red_flag'))
 
     def open_program_notepad(self, item):
         vals = self.tree_cat.item(item, "values")
-        prog_name = vals[2]
+        prog_name = vals[1]
         if sys.platform == "win32":
             try:
                 subprocess.Popen(["notepad.exe", f"{prog_name}.txt"])
@@ -675,8 +696,9 @@ class CNCManagerApp:
         for s in selected:
             vals = self.tree_cat.item(s, "values")
             item_data = {
-                "model": vals[1],
-                "program": vals[2],
+                "model": vals[0],
+                "program": vals[1],
+                "block_dim": vals[2],
                 "block_num": "Saisir...",
                 "block_date": datetime.today().strftime('%Y-%m-%d'),
                 "block_density": "28"
@@ -691,7 +713,7 @@ class CNCManagerApp:
             self.tree_work.delete(row)
         for item in self.work_list:
             self.tree_work.insert("", tk.END, values=(
-                item["model"], item["program"], item["block_num"], item["block_date"], item["block_density"]
+                item["model"], item["program"], item["block_dim"], item["block_num"], item["block_date"], item["block_density"]
             ))
 
     def edit_block_info(self):
@@ -747,21 +769,19 @@ class CNCManagerApp:
         cursor = conn.cursor()
         for item in self.work_list:
             cursor.execute('''
-                INSERT INTO machining_history (operator_username, model_name, program_name, block_num, block_date, block_density)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (self.user['username'], item['model'], item['program'], item['block_num'], item['block_date'], item['block_density']))
+                INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, block_date, block_density)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (self.user['username'], item['model'], item['program'], item['block_dim'], item['block_num'], item['block_date'], item['block_density']))
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Ordre d'usinage enregistré !")
+        messagebox.showinfo("Succès", "Ordre d'usinage du jour enregistré dans l'historique !")
         self.work_list.clear()
         self.refresh_work_tree()
-        self.load_history_data()
+        if self.user['role'] == 'ADMIN':
+            self.load_history_data()
 
 
-# ==========================================
-# POINT D'ENTRÉE
-# ==========================================
 if __name__ == "__main__":
     init_db()
 
