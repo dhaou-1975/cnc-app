@@ -1,24 +1,18 @@
 import os
 import re
 import sys
+import csv
 import sqlite3
-import fnmatch
 import subprocess
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-# Importation de pandas et openpyxl pour le traitement Excel
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
-
 # ==========================================
 # METADONNÉES & CONFIGURATION BDD
 # ==========================================
 APP_NAME = "CNC Manager - ERP Ateliers Windsurf"
-APP_VERSION = "v3.0.0 (GitHub Build Auto)"
+APP_VERSION = "v3.2.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -27,7 +21,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # Table Utilisateurs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +30,6 @@ def init_db():
         )
     ''')
 
-    # Table Catalogue Modèles
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS models_catalog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +47,6 @@ def init_db():
         )
     ''')
 
-    # Table Historique Usinage Opérateur
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS machining_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,14 +60,17 @@ def init_db():
         )
     ''')
 
-    # Création des comptes par défaut si la table est vide
-    cursor.execute("SELECT count(*) FROM users")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'ADMIN')")
-        cursor.execute("INSERT INTO users (username, password, role) VALUES ('op1', '1234', 'OPERATEUR')")
-
     conn.commit()
     conn.close()
+
+
+def get_user_count():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
 
 
 # ==========================================
@@ -127,44 +121,53 @@ class LoginDialog(tk.Toplevel):
             self.user_data = {"username": row[0], "role": row[1]}
             self.destroy()
         else:
-            messagebox.showerror("Erreur", "Identifiant ou mot de passe incorrect.")
+            messagebox.showerror("Erreur", "Nom d'utilisateur ou mot de passe incorrect.")
 
 
 # ==========================================
-# DIALOGUES D'ADMINISTRATION
+# GESTION UTILISATEURS (COMPLÈTE)
 # ==========================================
 class UserManagementDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Gestion des Utilisateurs")
-        self.geometry("500x350")
+        self.geometry("560x420")
         self.grab_set()
 
-        ttk.Label(self, text="Comptes Utilisateurs", font=("Arial", 12, "bold")).pack(pady=5)
+        ttk.Label(self, text="Gestion des Comptes & Autorisations", font=("Arial", 12, "bold")).pack(pady=5)
 
         frame_list = ttk.Frame(self, padding=5)
         frame_list.pack(fill=tk.BOTH, expand=True)
 
-        self.tree_users = ttk.Treeview(frame_list, columns=("id", "username", "role"), show="headings")
+        self.tree_users = ttk.Treeview(frame_list, columns=("id", "username", "role"), show="headings", selectmode="browse")
         self.tree_users.heading("id", text="ID")
         self.tree_users.heading("username", text="Utilisateur")
         self.tree_users.heading("role", text="Rôle")
         self.tree_users.column("id", width=50, anchor=tk.CENTER)
-        self.tree_users.pack(fill=tk.BOTH, expand=True)
+        self.tree_users.column("username", width=220)
+        self.tree_users.column("role", width=200)
+        self.tree_users.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        frame_form = ttk.Frame(self, padding=10)
-        frame_form.pack(fill=tk.X)
+        # Actions d'édition et suppression
+        frame_actions = ttk.Frame(frame_list, padding=5)
+        frame_actions.pack(side=tk.RIGHT, fill=tk.Y)
+        ttk.Button(frame_actions, text="✏️ Modifier", command=self.edit_user).pack(fill=tk.X, pady=5)
+        ttk.Button(frame_actions, text="🗑️ Supprimer", command=self.delete_user).pack(fill=tk.X, pady=5)
+
+        # Formulaire d'ajout / modification
+        frame_form = ttk.LabelFrame(self, text=" Saisie Utilisateur ", padding=10)
+        frame_form.pack(fill=tk.X, padx=10, pady=10)
 
         ttk.Label(frame_form, text="Nom:").grid(row=0, column=0, padx=2)
         self.ent_u = ttk.Entry(frame_form, width=12)
         self.ent_u.grid(row=0, column=1, padx=2)
 
-        ttk.Label(frame_form, text="Pswd:").grid(row=0, column=2, padx=2)
+        ttk.Label(frame_form, text="M.Passe:").grid(row=0, column=2, padx=2)
         self.ent_p = ttk.Entry(frame_form, width=12, show="*")
         self.ent_p.grid(row=0, column=3, padx=2)
 
         ttk.Label(frame_form, text="Rôle:").grid(row=0, column=4, padx=2)
-        self.cmb_r = ttk.Combobox(frame_form, values=["OPERATEUR", "ADMIN"], width=10, state="readonly")
+        self.cmb_r = ttk.Combobox(frame_form, values=["OPERATEUR", "ADMIN"], width=11, state="readonly")
         self.cmb_r.set("OPERATEUR")
         self.cmb_r.grid(row=0, column=5, padx=2)
 
@@ -188,7 +191,7 @@ class UserManagementDialog(tk.Toplevel):
         r = self.cmb_r.get()
 
         if not u or not p:
-            messagebox.showwarning("Erreur", "Tous les champs sont requis.")
+            messagebox.showwarning("Erreur", "Saisissez un nom d'utilisateur et un mot de passe.")
             return
 
         conn = sqlite3.connect(DB_FILE)
@@ -196,7 +199,7 @@ class UserManagementDialog(tk.Toplevel):
         try:
             cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (u, p, r))
             conn.commit()
-            messagebox.showinfo("Succès", f"Utilisateur {u} ajouté.")
+            messagebox.showinfo("Succès", f"Compte '{u}' créé.")
             self.load_users()
             self.ent_u.delete(0, tk.END)
             self.ent_p.delete(0, tk.END)
@@ -204,6 +207,79 @@ class UserManagementDialog(tk.Toplevel):
             messagebox.showerror("Erreur", "Ce nom d'utilisateur existe déjà.")
         finally:
             conn.close()
+
+    def delete_user(self):
+        selected = self.tree_users.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Sélectionnez un utilisateur à supprimer.")
+            return
+
+        user_id, username, role = self.tree_users.item(selected[0], "values")
+
+        # Vérification si c'est le seul administrateur
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT count(*) FROM users WHERE role='ADMIN'")
+        admin_count = cursor.fetchone()[0]
+
+        if role == 'ADMIN' and admin_count <= 1:
+            messagebox.showerror("Erreur", "Impossible de supprimer le dernier compte Administrateur !")
+            conn.close()
+            return
+
+        if messagebox.askyesno("Confirmation", f"Voulez-vous supprimer l'utilisateur '{username}' ?"):
+            cursor.execute("DELETE FROM users WHERE id=?", (user_id,))
+            conn.commit()
+            conn.close()
+            self.load_users()
+            messagebox.showinfo("Succès", "Utilisateur supprimé.")
+
+    def edit_user(self):
+        selected = self.tree_users.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Sélectionnez un utilisateur à modifier.")
+            return
+
+        user_id, username, current_role = self.tree_users.item(selected[0], "values")
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Modifier {username}")
+        dlg.geometry("320x200")
+        dlg.grab_set()
+
+        ttk.Label(dlg, text=f"Modification de : {username}", font=("Arial", 10, "bold")).pack(pady=10)
+
+        frame = ttk.Frame(dlg, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Nouveau M.Passe (laisser vide si inchangé) :").grid(row=0, column=0, sticky=tk.W, pady=2)
+        ent_new_p = ttk.Entry(frame, show="*")
+        ent_new_p.grid(row=1, column=0, sticky=tk.EW, pady=5)
+
+        ttk.Label(frame, text="Rôle :").grid(row=2, column=0, sticky=tk.W, pady=2)
+        cmb_new_r = ttk.Combobox(frame, values=["OPERATEUR", "ADMIN"], state="readonly")
+        cmb_new_r.set(current_role)
+        cmb_new_r.grid(row=3, column=0, sticky=tk.EW, pady=5)
+
+        def save_edits():
+            new_pwd = ent_new_p.get().strip()
+            new_role = cmb_new_r.get()
+
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+
+            if new_pwd:
+                cursor.execute("UPDATE users SET password=?, role=? WHERE id=?", (new_pwd, new_role, user_id))
+            else:
+                cursor.execute("UPDATE users SET role=? WHERE id=?", (new_role, user_id))
+
+            conn.commit()
+            conn.close()
+            dlg.destroy()
+            self.load_users()
+            messagebox.showinfo("Succès", "Modifications enregistrées.")
+
+        ttk.Button(dlg, text="Enregistrer", command=save_edits).pack(pady=10)
 
 
 class AddEditModelDialog(tk.Toplevel):
@@ -309,7 +385,7 @@ class CNCManagerApp:
         menubar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Importer Fichier Excel...", command=self.import_excel)
+        file_menu.add_command(label="Importer Fichier Excel/CSV...", command=self.import_csv)
         file_menu.add_command(label="Actualiser", command=self.load_catalog_data)
         file_menu.add_separator()
         file_menu.add_command(label="Quitter", command=self.root.quit)
@@ -328,7 +404,7 @@ class CNCManagerApp:
         header_frame.pack(fill=tk.X)
 
         ttk.Label(header_frame, text=APP_NAME, font=("Arial", 16, "bold")).pack(side=tk.LEFT)
-        user_info = f"Opérateur : {self.user['username']} | Rôle : {self.user['role']}"
+        user_info = f"Utilisateur : {self.user['username']} | Accès : {self.user['role']}"
         ttk.Label(header_frame, text=user_info, font=("Arial", 10, "italic"), foreground="blue").pack(side=tk.RIGHT)
 
         ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
@@ -337,29 +413,46 @@ class CNCManagerApp:
         toolbar = ttk.Frame(self.root, padding=10)
         toolbar.pack(fill=tk.X)
 
-        ttk.Button(toolbar, text="📥 Importer Excel", command=self.import_excel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="📥 Importer Fichier (CSV/Excel)", command=self.import_csv).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="🔄 Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(toolbar, text="Recherche dynamique (*PAD*, 21*, etc.) :").pack(side=tk.LEFT, padx=(15, 5))
+        # RECHERCHE PRO
+        ttk.Label(toolbar, text="Rechercher :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
+
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.filter_data())
-        ttk.Entry(toolbar, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=5)
+        ttk.Entry(toolbar, textvariable=self.search_var, width=25).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(toolbar, text="Dans la colonne :").pack(side=tk.LEFT, padx=(10, 5))
+
+        self.search_col_map = {
+            "Nom Modèle": 1,
+            "Programme Pain": 2,
+            "Dim. Bloc": 3,
+            "Outils": 6,
+            "Remarques": 10
+        }
+
+        self.cmb_search_col = ttk.Combobox(toolbar, values=list(self.search_col_map.keys()), state="readonly", width=18)
+        self.cmb_search_col.set("Nom Modèle")
+        self.cmb_search_col.pack(side=tk.LEFT, padx=5)
+        self.cmb_search_col.bind("<<ComboboxSelected>>", lambda e: self.filter_data())
 
     def _create_notebook(self):
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # Onglet Catalogue
+        # Catalogue
         self.tab_catalog = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_catalog, text="📋 Catalogue Modèles")
         self._setup_catalog_tree(self.tab_catalog)
 
-        # Onglet Poste Opérateur
+        # Poste Opérateur
         self.tab_work = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_work, text="🛠️ Ordre de Fabrication")
         self._setup_work_tree(self.tab_work)
 
-        # Onglet Historique
+        # Historique
         self.tab_history = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_history, text="📜 Historique Usinages")
         self._setup_history_tree(self.tab_history)
@@ -450,47 +543,51 @@ class CNCManagerApp:
         self.statusbar = ttk.Label(self.root, text=" Prêt.", relief=tk.SUNKEN, anchor=tk.W)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def import_excel(self):
-        if not pd:
-            messagebox.showerror("Erreur", "Pandas/Openpyxl n'est pas disponible.")
-            return
-
-        file_path = filedialog.askopenfilename(filetypes=[("Fichiers Excel", "*.xlsx *.xls")])
+    def import_csv(self):
+        """ Importation directe de fichiers CSV (Exposés depuis Excel) """
+        file_path = filedialog.askopenfilename(filetypes=[("Fichiers CSV", "*.csv"), ("Tous les fichiers", "*.*")])
         if not file_path:
             return
 
         try:
-            df = pd.read_excel(file_path)
-            df = df.fillna('')
-
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
+            count = 0
 
-            for _, row in df.iterrows():
-                vals = [str(x).strip() for x in row.values]
-                if len(vals) >= 2:
-                    cursor.execute('''
-                        INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        vals[0], vals[1],
-                        vals[2] if len(vals) > 2 else '',
-                        vals[3] if len(vals) > 3 else '',
-                        vals[4] if len(vals) > 4 else '',
-                        vals[5] if len(vals) > 5 else '',
-                        vals[6] if len(vals) > 6 else '',
-                        vals[7] if len(vals) > 7 else '',
-                        vals[8] if len(vals) > 8 else '',
-                        vals[9] if len(vals) > 9 else '',
-                        vals[10] if len(vals) > 10 else ''
-                    ))
+            # Détection automatique du séparateur (virgule ou point-virgule)
+            with open(file_path, 'r', encoding='utf-8-sig', errors='ignore') as f:
+                sample = f.read(2048)
+                delimiter = ';' if ';' in sample else ','
+                f.seek(0)
+
+                reader = csv.reader(f, delimiter=delimiter)
+                header = next(reader, None)  # Sauter l'en-tête
+
+                for row in reader:
+                    if row and len(row) >= 2:
+                        cursor.execute('''
+                            INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            row[0].strip(), row[1].strip(),
+                            row[2].strip() if len(row) > 2 else '',
+                            row[3].strip() if len(row) > 3 else '',
+                            row[4].strip() if len(row) > 4 else '',
+                            row[5].strip() if len(row) > 5 else '',
+                            row[6].strip() if len(row) > 6 else '',
+                            row[7].strip() if len(row) > 7 else '',
+                            row[8].strip() if len(row) > 8 else '',
+                            row[9].strip() if len(row) > 9 else '',
+                            row[10].strip() if len(row) > 10 else ''
+                        ))
+                        count += 1
 
             conn.commit()
             conn.close()
-            messagebox.showinfo("Succès", "Données Excel importées avec succès !")
+            messagebox.showinfo("Succès", f"{count} modèle(s) importé(s) avec succès !")
             self.load_catalog_data()
         except Exception as e:
-            messagebox.showerror("Erreur Importation", f"Erreur lors de la lecture du fichier Excel :\n{e}")
+            messagebox.showerror("Erreur Importation", f"Erreur lors de la lecture du fichier :\n{e}")
 
     def load_catalog_data(self):
         for row in self.tree_cat.get_children():
@@ -522,14 +619,15 @@ class CNCManagerApp:
         conn.close()
 
     def filter_data(self):
-        query = self.search_var.get().strip()
-        pattern = query.lower()
-        if pattern and not pattern.startswith("*") and not pattern.endswith("*"):
-            pattern = f"*{pattern}*"
+        query = self.search_var.get().strip().lower()
+        selected_col_name = self.cmb_search_col.get()
+        col_idx = self.search_col_map.get(selected_col_name, 1)
 
         for item in self.tree_cat.get_children():
             vals = self.tree_cat.item(item, "values")
-            if not query or re.match(fnmatch.translate(pattern), str(vals[1]).lower()) or re.match(fnmatch.translate(pattern), str(vals[2]).lower()):
+            cell_value = str(vals[col_idx]).lower()
+
+            if not query or query in cell_value:
                 self.tree_cat.reattach(item, "", tk.END)
             else:
                 self.tree_cat.detach(item)
@@ -670,12 +768,22 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.withdraw()
 
-    login = LoginDialog(root)
-    root.wait_window(login)
+    user_count = get_user_count()
 
-    if login.user_data:
+    if user_count == 0:
+        messagebox.showinfo(
+            "Premier Démarrage", 
+            "Aucun utilisateur enregistré.\nLe logiciel s'ouvre en mode Administrateur.\nUtilisez le menu 'Administration' pour créer vos comptes."
+        )
+        current_user = {"username": "Admin Initial", "role": "ADMIN"}
+    else:
+        login = LoginDialog(root)
+        root.wait_window(login)
+        current_user = login.user_data
+
+    if current_user:
         root.deiconify()
-        app = CNCManagerApp(root, login.user_data)
+        app = CNCManagerApp(root, current_user)
         root.mainloop()
     else:
         sys.exit(0)
