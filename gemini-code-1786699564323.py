@@ -1,6 +1,7 @@
 import os
 import sys
 import csv
+import re
 import sqlite3
 import subprocess
 from datetime import datetime
@@ -8,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v3.3.0"
+APP_VERSION = "v3.4.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -48,13 +49,18 @@ def init_db():
             operator_username TEXT NOT NULL,
             model_name TEXT NOT NULL,
             program_name TEXT NOT NULL,
-            block_dim TEXT NOT NULL,
+            block_dim TEXT DEFAULT '',
             block_num TEXT NOT NULL,
             block_date TEXT NOT NULL,
             block_density TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    try:
+        cursor.execute("ALTER TABLE machining_history ADD COLUMN block_dim TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -67,6 +73,17 @@ def get_user_count():
     count = cursor.fetchone()[0]
     conn.close()
     return count
+
+
+def match_wildcard(pattern, text):
+    """Gère la recherche avec wildcard (*) exemple: PAD* ou *85"""
+    if not pattern:
+        return True
+    if '*' in pattern:
+        regex_pattern = '^' + re.escape(pattern).replace(r'\*', '.*') + '$'
+        return bool(re.search(regex_pattern, text, re.IGNORECASE))
+    else:
+        return pattern.lower() in text.lower()
 
 
 class LoginDialog(tk.Toplevel):
@@ -182,6 +199,9 @@ class UserManagementDialog(tk.Toplevel):
             messagebox.showwarning("Erreur", "Saisissez un nom d'utilisateur et un mot de passe.")
             return
 
+        if not messagebox.askyesno("Confirmation", f"Voulez-vous créer le compte utilisateur '{u}' ?"):
+            return
+
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         try:
@@ -249,6 +269,9 @@ class UserManagementDialog(tk.Toplevel):
         cmb_new_r.grid(row=3, column=0, sticky=tk.EW, pady=5)
 
         def save_edits():
+            if not messagebox.askyesno("Confirmation", f"Voulez-vous enregistrer les modifications pour '{username}' ?"):
+                return
+
             new_pwd = ent_new_p.get().strip()
             new_role = cmb_new_r.get()
 
@@ -273,6 +296,7 @@ class AddEditModelDialog(tk.Toplevel):
     def __init__(self, parent, model_id=None):
         super().__init__(parent)
         self.model_id = model_id
+        self.parent_app = parent
         self.title("Nouveau Modèle" if not model_id else f"Modifier Modèle N°{model_id}")
         self.geometry("450x520")
         self.grab_set()
@@ -326,6 +350,9 @@ class AddEditModelDialog(tk.Toplevel):
             messagebox.showwarning("Erreur", "Le nom du modèle et du programme sont obligatoires.")
             return
 
+        if not messagebox.askyesno("Confirmation", "Voulez-vous enregistrer ce modèle dans le catalogue ?"):
+            return
+
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
 
@@ -342,8 +369,8 @@ class AddEditModelDialog(tk.Toplevel):
 
         conn.commit()
         conn.close()
-        messagebox.showinfo("Succès", "Modèle enregistré.")
-        self.master.load_catalog_data()
+        messagebox.showinfo("Succès", "Modèle enregistré avec succès.")
+        self.parent_app.load_catalog_data()
         self.destroy()
 
 
@@ -352,7 +379,7 @@ class CNCManagerApp:
         self.root = root
         self.user = current_user
         self.root.title(f"{APP_NAME} - Connecté : {self.user['username']} [{self.user['role']}]")
-        self.root.geometry("1280x750")
+        self.root.geometry("1280x780")
 
         self.red_flagged_items = set()
         self.work_list = []
@@ -403,15 +430,15 @@ class CNCManagerApp:
 
         ttk.Button(toolbar, text="🔄 Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(toolbar, text="Rechercher :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
+        ttk.Label(toolbar, text="Rechercher (* autorisée) :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
 
         self.search_var = tk.StringVar()
+        # Triggers instant filter update on any change
         self.search_var.trace_add("write", lambda *args: self.filter_data())
         ttk.Entry(toolbar, textvariable=self.search_var, width=25).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(toolbar, text="Dans :").pack(side=tk.LEFT, padx=(10, 5))
 
-        # CORRECTION ALIGNEMENT DES INDEX DES COLONNES
         self.search_col_map = {
             "Nom Modèle": 0,
             "Programme Pain": 1,
@@ -482,9 +509,68 @@ class CNCManagerApp:
         self.tree_cat.bind("<Button-3>", self.show_context_menu)
         self.tree_cat.bind("<Double-1>", lambda e: self.add_selected_to_worklist())
 
+        # Barre de Saisie Manuelle en bas du catalogue
+        frame_quick_add = ttk.LabelFrame(parent, text=" ➕ Saisie Manuelle Rapide Modèle (Bas de Catalogue) ", padding=5)
+        frame_quick_add.pack(fill=tk.X, padx=5, pady=5)
+
+        self.quick_add_entries = {}
+        fields_short = [
+            ("Modèle*", "model_name", 12),
+            ("Prog*", "program_name", 12),
+            ("Dim.Bloc", "block_dim", 12),
+            ("Qté", "qty_per_block", 5),
+            ("Z", "z_between_boards", 5),
+            ("Outils", "tools", 10),
+            ("Caisson", "caisson", 8),
+            ("Gamma", "plaque_gamma", 8),
+            ("Beta", "plaque_beta", 8),
+            ("Remarques", "remarks", 12)
+        ]
+
+        for idx, (lbl, key, width) in enumerate(fields_short):
+            ttk.Label(frame_quick_add, text=lbl, font=("Arial", 8)).grid(row=0, column=idx, padx=2)
+            ent = ttk.Entry(frame_quick_add, width=width)
+            ent.grid(row=1, column=idx, padx=2, pady=2)
+            self.quick_add_entries[key] = ent
+
+        btn_quick_add = ttk.Button(frame_quick_add, text="➕ Ajouter au Catalogue", command=self.quick_add_model)
+        btn_quick_add.grid(row=1, column=len(fields_short), padx=8, pady=2)
+
         btn_bar = ttk.Frame(parent, padding=5)
         btn_bar.pack(fill=tk.X)
-        ttk.Button(btn_bar, text="➕ Ajouter à ma Liste de Travail du Jour", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
+        ttk.Button(btn_bar, text="➕ Ajouter les modèles sélectionnés à ma Liste du Jour", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
+
+    def quick_add_model(self):
+        """Permet l'ajout rapide d'un modèle via les champs en bas du catalogue"""
+        m_name = self.quick_add_entries["model_name"].get().strip()
+        p_name = self.quick_add_entries["program_name"].get().strip()
+
+        if not m_name or not p_name:
+            messagebox.showwarning("Attention", "Les champs 'Modèle' et 'Prog' sont obligatoires.")
+            return
+
+        if not messagebox.askyesno("Confirmation", f"Voulez-vous ajouter le modèle '{m_name}' au catalogue ?"):
+            return
+
+        vals = [self.quick_add_entries[k].get().strip() for k in [
+            "model_name", "program_name", "block_dim", "qty_per_block",
+            "z_between_boards", "tools", "caisson", "plaque_gamma", "plaque_beta", "remarks"
+        ]]
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO models_catalog (model_name, program_name, block_dim, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', tuple(vals))
+        conn.commit()
+        conn.close()
+
+        for ent in self.quick_add_entries.values():
+            ent.delete(0, tk.END)
+
+        messagebox.showinfo("Succès", "Modèle ajouté au catalogue.")
+        self.load_catalog_data()
 
     def _setup_work_tree(self, parent):
         frame = ttk.Frame(parent, padding=5)
@@ -513,8 +599,9 @@ class CNCManagerApp:
         filter_frame = ttk.Frame(parent, padding=5)
         filter_frame.pack(fill=tk.X)
 
-        ttk.Label(filter_frame, text="Filtrer Historique :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        ttk.Label(filter_frame, text="Filtrer Historique (* autorisée) :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
         self.hist_filter_var = tk.StringVar()
+        # Triggers instant filter update on any change
         self.hist_filter_var.trace_add("write", lambda *args: self.filter_history_data())
         ttk.Entry(filter_frame, textvariable=self.hist_filter_var, width=30).pack(side=tk.LEFT, padx=5)
         ttk.Label(filter_frame, text="(Nom ouvrier, Date YYYY-MM-DD ou Modèle)").pack(side=tk.LEFT, padx=5)
@@ -544,6 +631,9 @@ class CNCManagerApp:
     def import_csv(self):
         file_path = filedialog.askopenfilename(filetypes=[("Fichiers CSV", "*.csv"), ("Tous les fichiers", "*.*")])
         if not file_path:
+            return
+
+        if not messagebox.askyesno("Confirmation", "Voulez-vous importer ce fichier CSV dans le catalogue ?"):
             return
 
         try:
@@ -605,6 +695,7 @@ class CNCManagerApp:
         if self.user['role'] == 'ADMIN':
             self.load_history_data()
 
+        self.filter_data()
         self.statusbar.config(text=f" {len(rows)} modèle(s) présent(s) dans le catalogue.")
 
     def load_history_data(self):
@@ -621,32 +712,37 @@ class CNCManagerApp:
             self.tree_hist.insert("", tk.END, values=r)
         conn.close()
 
+        self.filter_history_data()
+
     def filter_data(self):
-        query = self.search_var.get().strip().lower()
+        """Filtrage instantané du catalogue avec prise en charge de * wildcard"""
+        query = self.search_var.get().strip()
         selected_col_name = self.cmb_search_col.get()
         col_idx = self.search_col_map.get(selected_col_name, 0)
 
         for item in self.tree_cat.get_children():
             vals = self.tree_cat.item(item, "values")
-            cell_value = str(vals[col_idx]).lower()
+            cell_value = str(vals[col_idx])
 
-            if not query or query in cell_value:
+            if match_wildcard(query, cell_value):
                 self.tree_cat.reattach(item, "", tk.END)
             else:
                 self.tree_cat.detach(item)
 
     def filter_history_data(self):
+        """Filtrage instantané de l'historique avec prise en charge de * wildcard"""
         if self.user['role'] != 'ADMIN':
             return
 
-        query = self.hist_filter_var.get().strip().lower()
+        query = self.hist_filter_var.get().strip()
 
         for item in self.tree_hist.get_children():
             vals = self.tree_hist.item(item, "values")
-            # Opérateur (1), Modèle (2), Date (6)
-            match = query in str(vals[1]).lower() or query in str(vals[2]).lower() or query in str(vals[6]).lower()
+            op_match = match_wildcard(query, str(vals[1]))
+            model_match = match_wildcard(query, str(vals[2]))
+            date_match = match_wildcard(query, str(vals[6]))
 
-            if not query or match:
+            if not query or op_match or model_match or date_match:
                 self.tree_hist.reattach(item, "", tk.END)
             else:
                 self.tree_hist.detach(item)
@@ -693,6 +789,10 @@ class CNCManagerApp:
 
     def add_selected_to_worklist(self):
         selected = self.tree_cat.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Veuillez sélectionner au moins un modèle.")
+            return
+
         for s in selected:
             vals = self.tree_cat.item(s, "values")
             item_data = {
@@ -765,6 +865,10 @@ class CNCManagerApp:
             messagebox.showwarning("Attention", "Votre liste de travail est vide.")
             return
 
+        # Demande de confirmation avant enregistrement final
+        if not messagebox.askyesno("Enregistrement", "Voulez-vous valider et enregistrer cet ordre d'usinage dans l'historique ?"):
+            return
+
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         for item in self.work_list:
@@ -775,7 +879,7 @@ class CNCManagerApp:
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Ordre d'usinage du jour enregistré dans l'historique !")
+        messagebox.showinfo("Succès", "Ordre d'usinage du jour enregistré avec succès !")
         self.work_list.clear()
         self.refresh_work_tree()
         if self.user['role'] == 'ADMIN':
