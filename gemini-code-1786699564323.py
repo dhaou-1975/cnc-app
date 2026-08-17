@@ -76,6 +76,7 @@ def init_db():
         )
     ''')
 
+    # Mises à jour de structure si la base existait sous une ancienne version
     cursor.execute("PRAGMA table_info(machining_history)")
     cols = [col[1] for col in cursor.fetchall()]
     if "pain_num" not in cols:
@@ -86,6 +87,7 @@ def init_db():
     if "pain_num" not in cols_work:
         cursor.execute("ALTER TABLE current_worklist ADD COLUMN pain_num TEXT DEFAULT ''")
 
+    # Compte administrateur par défaut
     cursor.execute('''
         INSERT INTO users (username, password, role)
         VALUES ('admin', 'admin', 'ADMIN')
@@ -237,6 +239,57 @@ class AddModelDialog(tk.Toplevel):
 
         messagebox.showinfo("Succès", f"Le modèle '{m_name}' a été ajouté au catalogue.")
         self.main_app.load_catalog_data()
+        self.destroy()
+
+
+class EditBlockInfoDialog(tk.Toplevel):
+    def __init__(self, parent, item_data, on_save_callback):
+        super().__init__(parent)
+        self.title("Éditer Informations Bloc & Pain")
+        self.geometry("450x320")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self.item_data = item_data
+        self.on_save_callback = on_save_callback
+
+        ttk.Label(self, text=f"Informations - {item_data['model']}", font=("Arial", 11, "bold")).pack(pady=10)
+
+        frame = ttk.Frame(self, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="N° / ID Bloc :").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.ent_block_num = ttk.Entry(frame, width=25)
+        self.ent_block_num.insert(0, item_data.get("block_num", ""))
+        self.ent_block_num.grid(row=0, column=1, pady=5)
+
+        ttk.Label(frame, text="N° Pain (Polystyrène) :").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.ent_pain_num = ttk.Entry(frame, width=25)
+        self.ent_pain_num.insert(0, item_data.get("pain_num", ""))
+        self.ent_pain_num.grid(row=1, column=1, pady=5)
+
+        ttk.Label(frame, text="Date Réception :").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.ent_date = ttk.Entry(frame, width=25)
+        self.ent_date.insert(0, item_data.get("block_date", datetime.now().strftime("%Y-%m-%d")))
+        self.ent_date.grid(row=2, column=1, pady=5)
+
+        ttk.Label(frame, text="Densité (kg/m³) :").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.ent_density = ttk.Entry(frame, width=25)
+        self.ent_density.insert(0, item_data.get("block_density", ""))
+        self.ent_density.grid(row=3, column=1, pady=5)
+
+        btn_box = ttk.Frame(self, padding=10)
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="Valider", command=self.save).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_box, text="Annuler", command=self.destroy).pack(side=tk.RIGHT)
+
+    def save(self):
+        self.item_data["block_num"] = self.ent_block_num.get().strip()
+        self.item_data["pain_num"] = self.ent_pain_num.get().strip()
+        self.item_data["block_date"] = self.ent_date.get().strip()
+        self.item_data["block_density"] = self.ent_density.get().strip()
+
+        self.on_save_callback()
         self.destroy()
 
 
@@ -481,7 +534,6 @@ class CNCManagerApp:
         self.notebook.add(self.tab_work, text="Ordre de Fabrication (Zone Opérateur)")
         self._setup_work_tree(self.tab_work)
 
-        # Seul l'administrateur accède à cette fenêtre, nommée "Historique Usinages"
         if self.user['role'] == 'ADMIN':
             self.tab_history = ttk.Frame(self.notebook)
             self.notebook.add(self.tab_history, text="Historique Usinages")
@@ -560,7 +612,7 @@ class CNCManagerApp:
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_work, _c, False))
 
-        # Tag avec FOND ROUGE vif et texte blanc pour informations manquantes
+        # Coloration rouge si données manquantes
         self.tree_work.tag_configure('missing_info', background='#D32F2F', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
@@ -605,7 +657,6 @@ class CNCManagerApp:
         for col, text in self.hist_cols.items():
             self.tree_hist.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_hist, _c, False))
 
-        # Tag avec FOND ROUGE vif et texte blanc pour informations manquantes
         self.tree_hist.tag_configure('missing_info', background='#D32F2F', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_hist.yview)
@@ -721,7 +772,7 @@ class CNCManagerApp:
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
 
     def check_match(self, query_str, cell_value):
-        """Recherche souple prenant en compte les zéros au début (ex: '0', '012') et les sous-chaînes."""
+        """Recherche souple prenant en compte les zéros au début et les sous-chaînes."""
         if not query_str:
             return True
         q = str(query_str).strip().lower()
@@ -769,7 +820,6 @@ class CNCManagerApp:
                     cell_val = str(row[col_idx]) if len(row) > col_idx and row[col_idx] is not None else ""
 
                     if self.check_match(query, cell_val):
-                        # FOND ROUGE si information manquante
                         block_val = str(row[5]).strip().upper() if len(row) > 5 else ""
                         pain_val = str(row[6]).strip().upper() if len(row) > 6 else ""
 
@@ -793,48 +843,49 @@ class CNCManagerApp:
                 "remarks": vals[9],
                 "block_num": "",
                 "pain_num": "",
-                "block_date": "",
+                "block_date": datetime.now().strftime("%Y-%m-%d"),
                 "block_density": ""
             }
             self.work_list.append(work_item)
             added_count += 1
 
-        self.save_worklist_to_db()
-        self.load_catalog_data()
         self.refresh_work_tree()
-        self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste de fabrication.")
+        self.filter_data()
+        self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste d'usinage.")
 
     def refresh_work_tree(self):
-        for r in self.tree_work.get_children():
-            self.tree_work.delete(r)
+        for item in self.tree_work.get_children():
+            self.tree_work.delete(item)
 
-        query = self.search_var.get().strip() if self.current_tab_key == "work" else ""
-        selected_col_name = self.cmb_search_col.get() if self.current_tab_key == "work" else ""
+        query = self.search_var.get().strip()
+        selected_col_name = self.cmb_search_col.get()
         col_map = self.search_maps["work"]
         col_idx = col_map.get(selected_col_name, 1)
 
-        for idx, item in enumerate(self.work_list):
-            prio = f"P{idx + 1}"
-            vals = (
-                prio,
+        for idx, item in enumerate(self.work_list, start=1):
+            row_vals = (
+                f"P{idx}",
                 item["model"],
                 item["program"],
                 item["block_dim"],
-                item["block_num"] if item["block_num"] else "NON RENSEIGNÉ",
-                item["pain_num"] if item.get("pain_num") else "NON RENSEIGNÉ",
+                item.get("block_num", ""),
+                item.get("pain_num", ""),
                 item["tools"],
                 item["remarks"],
-                item["block_date"],
-                item["block_density"]
+                item.get("block_date", ""),
+                item.get("block_density", "")
             )
 
-            cell_val = str(vals[col_idx]) if len(vals) > col_idx and vals[col_idx] is not None else ""
+            cell_val = str(row_vals[col_idx]) if len(row_vals) > col_idx else ""
 
             if self.check_match(query, cell_val):
-                # FOND ROUGE si information manquante
-                is_missing = (not item["block_num"]) or (not item.get("pain_num")) or (item["block_num"] == "NON RENSEIGNÉ") or (item.get("pain_num") == "NON RENSEIGNÉ")
+                b_num = item.get("block_num", "").strip().upper()
+                p_num = item.get("pain_num", "").strip().upper()
+
+                is_missing = ("NON" in b_num or not b_num) or ("NON" in p_num or not p_num)
                 tags = ('missing_info',) if is_missing else ()
-                self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
+
+                self.tree_work.insert("", tk.END, iid=str(idx - 1), values=row_vals, tags=tags)
 
         autofit_treeview_columns(self.tree_work, self.work_cols)
 
@@ -845,7 +896,6 @@ class CNCManagerApp:
         idx = int(selected[0])
         if idx > 0:
             self.work_list[idx], self.work_list[idx - 1] = self.work_list[idx - 1], self.work_list[idx]
-            self.save_worklist_to_db()
             self.refresh_work_tree()
             self.tree_work.selection_set(str(idx - 1))
 
@@ -856,149 +906,35 @@ class CNCManagerApp:
         idx = int(selected[0])
         if idx < len(self.work_list) - 1:
             self.work_list[idx], self.work_list[idx + 1] = self.work_list[idx + 1], self.work_list[idx]
-            self.save_worklist_to_db()
             self.refresh_work_tree()
             self.tree_work.selection_set(str(idx + 1))
-
-    def remove_from_worklist(self):
-        selected = self.tree_work.selection()
-        if not selected:
-            messagebox.showwarning("Attention", "Sélectionnez une ligne à retirer.")
-            return
-
-        idx = int(selected[0])
-        del self.work_list[idx]
-        self.save_worklist_to_db()
-        self.load_catalog_data()
-        self.refresh_work_tree()
 
     def edit_block_info(self):
         selected = self.tree_work.selection()
         if not selected:
-            messagebox.showwarning("Attention", "Veuillez sélectionner un modèle dans la liste du jour.")
+            messagebox.showwarning("Attention", "Sélectionnez un élément à éditer.")
             return
 
         idx = int(selected[0])
-        item = self.work_list[idx]
+        item_data = self.work_list[idx]
 
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"Saisie Bloc & Pain : {item['model']}")
-        dlg.geometry("420x350")
-        dlg.resizable(False, False)
-        dlg.grab_set()
+        EditBlockInfoDialog(self.root, item_data, self.refresh_work_tree)
 
-        ttk.Label(dlg, text=f"Informations Bloc pour {item['model']}", font=("Arial", 10, "bold")).pack(pady=10)
-
-        frame = ttk.Frame(dlg, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(frame, text="Dimension Bloc :").grid(row=0, column=0, sticky=tk.W, pady=5)
-        ent_dim = ttk.Entry(frame)
-        ent_dim.insert(0, item["block_dim"])
-        ent_dim.grid(row=0, column=1, sticky=tk.EW, pady=5)
-
-        ttk.Label(frame, text="N° / ID Bloc * :").grid(row=1, column=0, sticky=tk.W, pady=5)
-        ent_num = ttk.Entry(frame)
-        ent_num.insert(0, item["block_num"])
-        ent_num.grid(row=1, column=1, sticky=tk.EW, pady=5)
-
-        ttk.Label(frame, text="N° Pain (Polystyrène) * :").grid(row=2, column=0, sticky=tk.W, pady=5)
-        ent_pain = ttk.Entry(frame)
-        ent_pain.insert(0, item.get("pain_num", ""))
-        ent_pain.grid(row=2, column=1, sticky=tk.EW, pady=5)
-
-        ttk.Label(frame, text="Date Réception :").grid(row=3, column=0, sticky=tk.W, pady=5)
-        ent_date = ttk.Entry(frame)
-        ent_date.insert(0, item["block_date"] or datetime.now().strftime("%Y-%m-%d"))
-        ent_date.grid(row=3, column=1, sticky=tk.EW, pady=5)
-
-        ttk.Label(frame, text="Densité (kg/m³) :").grid(row=4, column=0, sticky=tk.W, pady=5)
-        ent_density = ttk.Entry(frame)
-        ent_density.insert(0, item["block_density"])
-        ent_density.grid(row=4, column=1, sticky=tk.EW, pady=5)
-
-        def save_info():
-            item["block_dim"] = ent_dim.get().strip()
-            item["block_num"] = ent_num.get().strip()
-            item["pain_num"] = ent_pain.get().strip()
-            item["block_date"] = ent_date.get().strip()
-            item["block_density"] = ent_density.get().strip()
-            self.save_worklist_to_db()
-            self.refresh_work_tree()
-            dlg.destroy()
-
-        btn_box = ttk.Frame(dlg, padding=10)
-        btn_box.pack(fill=tk.X)
-        ttk.Button(btn_box, text="Valider", command=save_info).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_box, text="Plus tard", command=dlg.destroy).pack(side=tk.RIGHT, padx=5)
-
-    def save_worklist_to_db(self):
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM current_worklist")
-            for idx, item in enumerate(self.work_list):
-                cursor.execute('''
-                    INSERT INTO current_worklist (prio, model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    idx + 1, item["model"], item["program"], item["block_dim"],
-                    item["tools"], item["remarks"], item["block_num"],
-                    item.get("pain_num", ""), item["block_date"], item["block_density"]
-                ))
-            conn.commit()
-            conn.close()
-            now_str = datetime.now().strftime("%H:%M:%S")
-            self.statusbar.config(text=f" Liste sauvegardée en base de données à {now_str}.")
-        except Exception as e:
-            self.statusbar.config(text=f" Erreur lors de la sauvegarde : {e}")
-
-    def load_saved_worklist(self):
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density FROM current_worklist ORDER BY prio ASC")
-            rows = cursor.fetchall()
-            conn.close()
-
-            self.work_list = []
-            for r in rows:
-                self.work_list.append({
-                    "model": r[0],
-                    "program": r[1],
-                    "block_dim": r[2],
-                    "tools": r[3],
-                    "remarks": r[4],
-                    "block_num": r[5],
-                    "pain_num": r[6],
-                    "block_date": r[7],
-                    "block_density": r[8]
-                })
-        except Exception:
-            self.work_list = []
-
-    def start_auto_save_thread(self):
-        def auto_save_loop():
-            while self.is_running:
-                time.sleep(300)
-                if self.is_running:
-                    self.save_worklist_to_db()
-
-        t = threading.Thread(target=auto_save_loop, daemon=True)
-        t.start()
+    def remove_from_worklist(self):
+        selected = self.tree_work.selection()
+        if not selected:
+            return
+        idx = int(selected[0])
+        del self.work_list[idx]
+        self.refresh_work_tree()
+        self.filter_data()
 
     def validate_worklist(self):
         if not self.work_list:
-            messagebox.showwarning("Attention", "Votre liste du jour est vide !")
+            messagebox.showwarning("Liste Vide", "Aucun élément à valider dans l'ordre de fabrication.")
             return
 
-        missing = [item["model"] for item in self.work_list if not item["block_num"] or not item.get("pain_num")]
-
-        msg = f"Voulez-vous valider et enregistrer l'usinage de ces {len(self.work_list)} modèle(s) ?"
-        if missing:
-            msg += f"\n\nAttention : {len(missing)} modèle(s) ont des données manquantes (N° Bloc / N° Pain sur fond rouge)."
-
-        if not messagebox.askyesno("Confirmation", msg):
+        if not messagebox.askyesno("Validation Usinage", "Confirmer la validation et l'enregistrement de l'usinage courant dans l'historique ?"):
             return
 
         conn = sqlite3.connect(DB_FILE)
@@ -1006,47 +942,113 @@ class CNCManagerApp:
 
         for item in self.work_list:
             cursor.execute('''
-                INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, pain_num, block_date, block_density)
+                INSERT INTO machining_history 
+                (operator_username, model_name, program_name, block_dim, block_num, pain_num, block_date, block_density)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 self.user["username"],
                 item["model"],
                 item["program"],
                 item["block_dim"],
-                item["block_num"] if item["block_num"] else "NON RENSEIGNÉ",
-                item.get("pain_num") if item.get("pain_num") else "NON RENSEIGNÉ",
-                item["block_date"],
-                item["block_density"]
+                item.get("block_num", "NON DEFINI"),
+                item.get("pain_num", "NON DEFINI"),
+                item.get("block_date", datetime.now().strftime("%Y-%m-%d")),
+                item.get("block_density", "N/A")
             ))
 
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Usinage du jour validé et archivé dans l'historique de traçabilité !")
+        messagebox.showinfo("Succès", "L'usinage a été enregistré avec succès dans l'historique !")
+        self.work_list.clear()
+        self.refresh_work_tree()
+        self.save_worklist_to_db()
         if self.user['role'] == 'ADMIN':
             self.load_history_data()
 
+    def save_worklist_to_db(self):
+        """Enregistre la liste d'usinage courante dans la base SQLite."""
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        cursor.execute("DELETE FROM current_worklist")
+
+        for idx, item in enumerate(self.work_list, start=1):
+            cursor.execute('''
+                INSERT INTO current_worklist 
+                (prio, model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                idx,
+                item["model"],
+                item["program"],
+                item["block_dim"],
+                item["tools"],
+                item["remarks"],
+                item.get("block_num", ""),
+                item.get("pain_num", ""),
+                item.get("block_date", ""),
+                item.get("block_density", "")
+            ))
+
+        conn.commit()
+        conn.close()
+        self.statusbar.config(text=f" Liste sauvegardée dans la base ({datetime.now().strftime('%H:%M:%S')}).")
+
+    def load_saved_worklist(self):
+        """Restaure la dernière liste de travail enregistrée."""
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density FROM current_worklist ORDER BY prio ASC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        self.work_list = []
+        for r in rows:
+            self.work_list.append({
+                "model": r[0],
+                "program": r[1],
+                "block_dim": r[2],
+                "tools": r[3],
+                "remarks": r[4],
+                "block_num": r[5],
+                "pain_num": r[6],
+                "block_date": r[7],
+                "block_density": r[8]
+            })
+
+        self.refresh_work_tree()
+
+    def start_auto_save_thread(self):
+        """Sauvegarde en arrière-plan toutes les 60 secondes."""
+        def auto_save_loop():
+            while self.is_running:
+                time.sleep(60)
+                if self.is_running and self.work_list:
+                    try:
+                        self.save_worklist_to_db()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=auto_save_loop, daemon=True).start()
+
     def on_app_close(self):
         self.is_running = False
-        self.save_worklist_to_db()
-
-        missing_count = sum(1 for item in self.work_list if not item["block_num"] or not item.get("pain_num"))
-        if missing_count > 0:
-            resp = messagebox.askyesno(
-                "Données Incomplètes",
-                f"Attention : Vous avez {missing_count} modèle(s) dans votre liste avec des informations non renseignées (sur fond rouge).\n\n"
-                "Voulez-vous vraiment quitter ?"
-            )
-            if not resp:
-                return
+        try:
+            self.save_worklist_to_db()
+        except Exception:
+            pass
         self.root.destroy()
 
 
-def main():
+# ==============================================================================
+# POINT D'ENTRÉE DU PROGRAMME
+# ==============================================================================
+if __name__ == "__main__":
     init_db()
 
     root = tk.Tk()
-    root.withdraw()
+    root.withdraw()  # Masque la fenêtre principale tant que le login n'est pas validé
 
     login_dlg = LoginDialog(root)
     root.wait_window(login_dlg)
@@ -1055,7 +1057,5 @@ def main():
         root.deiconify()
         app = CNCManagerApp(root, login_dlg.user_data)
         root.mainloop()
-
-
-if __name__ == "__main__":
-    main()
+    else:
+        root.destroy()
