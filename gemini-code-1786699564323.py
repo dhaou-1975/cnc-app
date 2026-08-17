@@ -1,7 +1,6 @@
 import os
 import sys
 import csv
-import re
 import sqlite3
 import subprocess
 from datetime import datetime
@@ -9,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v3.6.0"
+APP_VERSION = "v3.7.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -84,7 +83,6 @@ def match_wildcard(pattern, text):
     pattern = pattern.strip()
     
     if '*' in pattern:
-        # Remplace * par .* pour le regex, mais gère correctement *1 (contient 1)
         cleaned_pattern = pattern.strip('*')
         if cleaned_pattern:
             return cleaned_pattern.lower() in text.lower()
@@ -103,7 +101,7 @@ def autofit_treeview_columns(tree, columns_dict):
             val_len = default_font.measure(cell_val) + 20
             if val_len > max_len:
                 max_len = val_len
-        tree.column(col_id, width=max(max_len, 80))
+        tree.column(col_id, width=max(max_len, 90))
 
 
 class LoginDialog(tk.Toplevel):
@@ -271,7 +269,7 @@ class DeleteModelDialog(tk.Toplevel):
         hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree_del.xview)
         self.tree_del.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.tree_del.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree_del.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -556,18 +554,48 @@ class CNCManagerApp:
 
         ttk.Label(toolbar, text="Dans :").pack(side=tk.LEFT, padx=(10, 5))
 
-        self.search_col_map = {
-            "Nom Modèle": 0,
-            "Programme Pain": 1,
-            "Dim. Bloc": 2,
-            "Outils": 5,
-            "Remarques": 9
+        # Dictionnaires de recherche par onglet
+        self.search_maps = {
+            "catalog": {
+                "Nom Modèle": 0,
+                "Programme Pain": 1,
+                "Dim. Bloc": 2,
+                "Outils": 5,
+                "Caisson": 6,
+                "Plaque Gamma": 7,
+                "Plaque Beta": 8,
+                "Remarques": 9
+            },
+            "work": {
+                "Nom du Modèle": 0,
+                "Programme Pain": 1,
+                "Dimension Bloc": 2,
+                "N° Outils": 3,
+                "Remarques": 4,
+                "Date Réception": 5,
+                "Densité (kg/m³)": 6
+            },
+            "history": {
+                "Opérateur": 1,
+                "Modèle": 2,
+                "Programme": 3,
+                "Dim. Bloc": 4,
+                "N° Bloc": 5,
+                "Date Bloc": 6
+            }
         }
 
-        self.cmb_search_col = ttk.Combobox(toolbar, values=list(self.search_col_map.keys()), state="readonly", width=18)
-        self.cmb_search_col.set("Nom Modèle")
+        self.cmb_search_col = ttk.Combobox(toolbar, state="readonly", width=18)
         self.cmb_search_col.pack(side=tk.LEFT, padx=5)
         self.cmb_search_col.bind("<<ComboboxSelected>>", lambda e: self.filter_data())
+
+    def _update_search_combobox_for_tab(self, tab_key):
+        """Met à jour les options du menu déroulant 'Dans :' selon l'onglet affiché."""
+        self.current_tab_key = tab_key
+        options = list(self.search_maps[tab_key].keys())
+        self.cmb_search_col['values'] = options
+        if options:
+            self.cmb_search_col.set(options[0])
 
     def _create_notebook(self):
         self.notebook = ttk.Notebook(self.root)
@@ -586,9 +614,23 @@ class CNCManagerApp:
             self.notebook.add(self.tab_history, text="Historique Usinages (Admin)")
             self._setup_history_tree(self.tab_history)
 
+        # Mise à jour des filtres 'Dans :' lors du changement d'onglet
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self._update_search_combobox_for_tab("catalog")
+
+    def _on_tab_changed(self, event):
+        idx = self.notebook.index(self.notebook.select())
+        if idx == 0:
+            self._update_search_combobox_for_tab("catalog")
+        elif idx == 1:
+            self._update_search_combobox_for_tab("work")
+        elif idx == 2 and self.user['role'] == 'ADMIN':
+            self._update_search_combobox_for_tab("history")
+        self.filter_data()
+
     def _setup_catalog_tree(self, parent):
-        frame = ttk.Frame(parent, padding=5)
-        frame.pack(fill=tk.BOTH, expand=True)
+        container = ttk.Frame(parent, padding=5)
+        container.pack(fill=tk.BOTH, expand=True)
 
         self.cat_cols = {
             "model": "Nom Modèle",
@@ -603,19 +645,20 @@ class CNCManagerApp:
             "remarks": "Remarques"
         }
 
-        self.tree_cat = ttk.Treeview(frame, columns=tuple(self.cat_cols.keys()), show="headings", selectmode="extended")
+        self.tree_cat = ttk.Treeview(container, columns=tuple(self.cat_cols.keys()), show="headings", selectmode="extended")
 
         for col, text in self.cat_cols.items():
             self.tree_cat.heading(col, text=text)
 
         self.tree_cat.tag_configure('red_flag', background='#ff7675', foreground='white')
 
-        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree_cat.yview)
-        hsb = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
+        vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_cat.yview)
+        hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
         self.tree_cat.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.tree_cat.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Structure du tableau et scrollbar collée au bas de la table
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_cat.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.tree_cat.bind("<Button-3>", self.show_context_menu)
@@ -626,29 +669,31 @@ class CNCManagerApp:
         ttk.Button(btn_bar, text="+ Ajouter les modèles sélectionnés à ma Liste du Jour", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
 
     def _setup_work_tree(self, parent):
-        frame = ttk.Frame(parent, padding=5)
-        frame.pack(fill=tk.BOTH, expand=True)
+        container = ttk.Frame(parent, padding=5)
+        container.pack(fill=tk.BOTH, expand=True)
 
         self.work_cols = {
             "model": "Nom du Modèle",
             "program": "Programme Pain",
             "block_dim": "Dimension Bloc",
-            "block_num": "N° du Bloc Matière",
+            "tools": "N° Outils",
+            "remarks": "Remarques",
             "block_date": "Date Réception",
             "block_density": "Densité (kg/m³)"
         }
 
-        self.tree_work = ttk.Treeview(frame, columns=tuple(self.work_cols.keys()), show="headings", selectmode="browse")
+        self.tree_work = ttk.Treeview(container, columns=tuple(self.work_cols.keys()), show="headings", selectmode="browse")
 
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text)
 
-        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree_work.yview)
-        hsb = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.tree_work.xview)
+        vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
+        hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_work.xview)
         self.tree_work.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.tree_work.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Placement exact de la scrollbar horizontale sous le tableau
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_work.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
         btn_bar = ttk.Frame(parent, padding=10)
@@ -659,16 +704,8 @@ class CNCManagerApp:
         ttk.Button(btn_bar, text="Valider & Enregistrer Usinage du Jour", command=self.validate_worklist).pack(side=tk.RIGHT, padx=5)
 
     def _setup_history_tree(self, parent):
-        filter_frame = ttk.Frame(parent, padding=5)
-        filter_frame.pack(fill=tk.X)
-
-        ttk.Label(filter_frame, text="Filtrer Historique :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
-        self.hist_filter_var = tk.StringVar()
-        self.hist_filter_var.trace_add("write", lambda *args: self.filter_history_data())
-        ttk.Entry(filter_frame, textvariable=self.hist_filter_var, width=30).pack(side=tk.LEFT, padx=5)
-
-        frame = ttk.Frame(parent, padding=5)
-        frame.pack(fill=tk.BOTH, expand=True)
+        container = ttk.Frame(parent, padding=5)
+        container.pack(fill=tk.BOTH, expand=True)
 
         self.hist_cols = {
             "id": "N°",
@@ -682,17 +719,17 @@ class CNCManagerApp:
             "timestamp": "Validation"
         }
 
-        self.tree_hist = ttk.Treeview(frame, columns=tuple(self.hist_cols.keys()), show="headings")
+        self.tree_hist = ttk.Treeview(container, columns=tuple(self.hist_cols.keys()), show="headings")
 
         for col, text in self.hist_cols.items():
             self.tree_hist.heading(col, text=text)
 
-        vsb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree_hist.yview)
-        hsb = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.tree_hist.xview)
+        vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_hist.yview)
+        hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_hist.xview)
         self.tree_hist.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.tree_hist.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_hist.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _create_statusbar(self):
@@ -789,39 +826,32 @@ class CNCManagerApp:
         conn.close()
 
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
-        self.filter_history_data()
 
     def filter_data(self):
-        """Filtrage instantané du catalogue : réaffiche tout dès que le champ est vide."""
+        """Filtrage instantané : réaffiche immédiatement tous les modèles quand la zone est vide."""
         query = self.search_var.get().strip()
         selected_col_name = self.cmb_search_col.get()
-        col_idx = self.search_col_map.get(selected_col_name, 0)
+        
+        tab_key = getattr(self, "current_tab_key", "catalog")
+        col_map = self.search_maps.get(tab_key, {})
+        col_idx = col_map.get(selected_col_name, 0)
 
-        for item in self.tree_cat.get_children():
-            vals = self.tree_cat.item(item, "values")
+        # Cible le Treeview correspondant à l'onglet actif
+        if tab_key == "catalog":
+            tree = self.tree_cat
+        elif tab_key == "work":
+            tree = self.tree_work
+        else:
+            tree = self.tree_hist if self.user['role'] == 'ADMIN' else self.tree_cat
+
+        for item in tree.get_children():
+            vals = tree.item(item, "values")
             cell_value = str(vals[col_idx]) if len(vals) > col_idx else ""
 
             if not query or match_wildcard(query, cell_value):
-                self.tree_cat.reattach(item, "", tk.END)
+                tree.reattach(item, "", tk.END)
             else:
-                self.tree_cat.detach(item)
-
-    def filter_history_data(self):
-        if self.user['role'] != 'ADMIN':
-            return
-
-        query = self.hist_filter_var.get().strip()
-
-        for item in self.tree_hist.get_children():
-            vals = self.tree_hist.item(item, "values")
-            op_match = match_wildcard(query, str(vals[1]))
-            model_match = match_wildcard(query, str(vals[2]))
-            date_match = match_wildcard(query, str(vals[6]))
-
-            if not query or op_match or model_match or date_match:
-                self.tree_hist.reattach(item, "", tk.END)
-            else:
-                self.tree_hist.detach(item)
+                tree.detach(item)
 
     def show_context_menu(self, event):
         item = self.tree_cat.identify_row(event.y)
@@ -868,7 +898,8 @@ class CNCManagerApp:
                 "model": vals[0],
                 "program": vals[1],
                 "block_dim": vals[2],
-                "block_num": "Saisir...",
+                "tools": vals[5] if len(vals) > 5 else "",
+                "remarks": vals[9] if len(vals) > 9 else "",
                 "block_date": datetime.today().strftime('%Y-%m-%d'),
                 "block_density": "28"
             }
@@ -882,7 +913,7 @@ class CNCManagerApp:
             self.tree_work.delete(row)
         for item in self.work_list:
             self.tree_work.insert("", tk.END, values=(
-                item["model"], item["program"], item["block_dim"], item["block_num"], item["block_date"], item["block_density"]
+                item["model"], item["program"], item["block_dim"], item["tools"], item["remarks"], item["block_date"], item["block_density"]
             ))
         autofit_treeview_columns(self.tree_work, self.work_cols)
 
@@ -899,10 +930,10 @@ class CNCManagerApp:
         dlg.title("Fiche Bloc Matière")
         dlg.geometry("350x250")
 
-        ttk.Label(dlg, text="N° du Bloc Matière :").pack(pady=2)
-        ent_num = ttk.Entry(dlg)
-        ent_num.insert(0, item["block_num"])
-        ent_num.pack(pady=2)
+        ttk.Label(dlg, text="N° Outils :").pack(pady=2)
+        ent_tools = ttk.Entry(dlg)
+        ent_tools.insert(0, item["tools"])
+        ent_tools.pack(pady=2)
 
         ttk.Label(dlg, text="Date Réception Bloc :").pack(pady=2)
         ent_date = ttk.Entry(dlg)
@@ -915,7 +946,7 @@ class CNCManagerApp:
         ent_dens.pack(pady=2)
 
         def save():
-            item["block_num"] = ent_num.get()
+            item["tools"] = ent_tools.get()
             item["block_date"] = ent_date.get()
             item["block_density"] = ent_dens.get()
             self.refresh_work_tree()
@@ -944,7 +975,7 @@ class CNCManagerApp:
             cursor.execute('''
                 INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, block_date, block_density)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (self.user['username'], item['model'], item['program'], item['block_dim'], item['block_num'], item['block_date'], item['block_density']))
+            ''', (self.user['username'], item['model'], item['program'], item['block_dim'], item['tools'], item['block_date'], item['block_density']))
         conn.commit()
         conn.close()
 
