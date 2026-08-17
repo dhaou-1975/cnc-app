@@ -1,13 +1,16 @@
 import os
 import sys
 import csv
+import re
 import sqlite3
+import threading
+import time
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v3.9.0"
+APP_VERSION = "v4.0.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -42,6 +45,21 @@ def init_db():
     ''')
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS current_worklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prio INTEGER,
+            model TEXT,
+            program TEXT,
+            block_dim TEXT,
+            tools TEXT,
+            remarks TEXT,
+            block_num TEXT,
+            block_date TEXT,
+            block_density TEXT
+        )
+    ''')
+
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS machining_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             operator_username TEXT NOT NULL,
@@ -62,7 +80,7 @@ def init_db():
 def get_user_count():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
+    cursor.execute("SELECT COUNT(*)")
     count = cursor.fetchone()[0]
     conn.close()
     return count
@@ -71,13 +89,13 @@ def get_user_count():
 def autofit_treeview_columns(tree, columns_dict):
     default_font = font.Font()
     for col_id, col_title in columns_dict.items():
-        max_len = default_font.measure(col_title) + 20
+        max_len = default_font.measure(col_title) + 25
         for item in tree.get_children():
             cell_val = str(tree.set(item, col_id))
-            val_len = default_font.measure(cell_val) + 20
+            val_len = default_font.measure(cell_val) + 25
             if val_len > max_len:
                 max_len = val_len
-        tree.column(col_id, width=max(max_len, 80))
+        tree.column(col_id, width=max(max_len, 90))
 
 
 class LoginDialog(tk.Toplevel):
@@ -267,16 +285,30 @@ class DeleteModelDialog(tk.Toplevel):
         self.filter_delete_list()
 
     def filter_delete_list(self):
-        query = self.search_var.get().strip().lower()
+        query = self.search_var.get().strip()
         col_idx = 1 if self.cmb_col.get() == "Nom Modèle" else 2
 
         for item in self.tree_del.get_children():
             self.tree_del.delete(item)
 
+        pattern = None
+        if query:
+            regex_str = "^" + re.escape(query).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+            try:
+                pattern = re.compile(regex_str, re.IGNORECASE)
+            except re.error:
+                pattern = None
+
         for row in self.all_rows:
-            cell_val = str(row[col_idx]).lower() if row[col_idx] else ""
-            if not query or query in cell_val:
+            cell_val = str(row[col_idx]) if row[col_idx] else ""
+            if not query:
                 self.tree_del.insert("", tk.END, values=row)
+            elif pattern:
+                if pattern.search(cell_val):
+                    self.tree_del.insert("", tk.END, values=row)
+            else:
+                if query.lower() in cell_val.lower():
+                    self.tree_del.insert("", tk.END, values=row)
 
     def delete_selected(self):
         selected = self.tree_del.selection()
@@ -410,6 +442,10 @@ class CNCManagerApp:
         self.work_list = []
         self.current_tab_key = "catalog"
 
+        # Style global pour augmenter la hauteur des lignes
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=28)
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
         self._create_menu()
@@ -418,7 +454,12 @@ class CNCManagerApp:
         self._create_notebook()
         self._create_statusbar()
 
+        self.load_saved_worklist()
         self.load_catalog_data()
+
+        # Démarrage de la sauvegarde automatique toutes les 5 minutes
+        self.is_running = True
+        self.start_auto_save_thread()
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
@@ -426,6 +467,7 @@ class CNCManagerApp:
         file_menu = tk.Menu(menubar, tearoff=0)
         if self.user['role'] == 'ADMIN':
             file_menu.add_command(label="Importer Fichier CSV...", command=self.import_csv)
+        file_menu.add_command(label="Sauvegarder la Liste", command=self.save_worklist_to_db)
         file_menu.add_command(label="Actualiser", command=self.refresh_all_data)
         file_menu.add_separator()
         file_menu.add_command(label="Quitter", command=self.on_app_close)
@@ -461,6 +503,7 @@ class CNCManagerApp:
             ttk.Button(toolbar, text="Importer CSV", command=self.import_csv).pack(side=tk.LEFT, padx=5)
 
         ttk.Button(toolbar, text="Actualiser", command=self.refresh_all_data).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="💾 Sauvegarder la Liste", command=self.save_worklist_to_db).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(toolbar, text="Rechercher :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
 
@@ -567,6 +610,9 @@ class CNCManagerApp:
         for col, text in self.cat_cols.items():
             self.tree_cat.heading(col, text=text)
 
+        # Tag pour signaler un élément déjà ajouté dans la liste de travail
+        self.tree_cat.tag_configure('already_selected', background='#E0E0E0', foreground='#666666')
+
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_cat.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
         self.tree_cat.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -602,7 +648,8 @@ class CNCManagerApp:
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text)
 
-        self.tree_work.tag_configure('missing_info', background='#FF7675', foreground='white')
+        # Fond Rouge strict pour les informations manquantes (N° Bloc non renseigné)
+        self.tree_work.tag_configure('missing_info', background='#FF4D4D', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_work.xview)
@@ -741,8 +788,16 @@ class CNCManagerApp:
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
 
     def filter_data(self):
-        query = self.search_var.get().strip().lower()
+        query = self.search_var.get().strip()
         selected_col_name = self.cmb_search_col.get()
+
+        pattern = None
+        if query:
+            regex_str = "^" + re.escape(query).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+            try:
+                pattern = re.compile(regex_str, re.IGNORECASE)
+            except re.error:
+                pattern = None
 
         if self.current_tab_key == "catalog":
             tree = self.tree_cat
@@ -752,13 +807,26 @@ class CNCManagerApp:
             for item in tree.get_children():
                 tree.delete(item)
 
+            selected_models = [w["model"] for w in self.work_list]
+
             if hasattr(self, 'catalog_rows'):
                 for r in self.catalog_rows:
                     db_id = r[0]
                     display_values = r[1:]
-                    cell_val = str(display_values[col_idx]).lower() if len(display_values) > col_idx and display_values[col_idx] else ""
-                    if not query or query in cell_val:
-                        tree.insert("", tk.END, iid=str(db_id), values=display_values)
+                    cell_val = str(display_values[col_idx]) if len(display_values) > col_idx and display_values[col_idx] else ""
+
+                    is_match = False
+                    if not query:
+                        is_match = True
+                    elif pattern:
+                        is_match = bool(pattern.search(cell_val))
+                    else:
+                        is_match = query.lower() in cell_val.lower()
+
+                    if is_match:
+                        model_name = display_values[0]
+                        tags = ('already_selected',) if model_name in selected_models else ()
+                        tree.insert("", tk.END, iid=str(db_id), values=display_values, tags=tags)
 
         elif self.current_tab_key == "work":
             self.refresh_work_tree()
@@ -773,8 +841,17 @@ class CNCManagerApp:
 
             if hasattr(self, 'history_rows'):
                 for row in self.history_rows:
-                    cell_val = str(row[col_idx]).lower() if len(row) > col_idx and row[col_idx] else ""
-                    if not query or query in cell_val:
+                    cell_val = str(row[col_idx]) if len(row) > col_idx and row[col_idx] else ""
+
+                    is_match = False
+                    if not query:
+                        is_match = True
+                    elif pattern:
+                        is_match = bool(pattern.search(cell_val))
+                    else:
+                        is_match = query.lower() in cell_val.lower()
+
+                    if is_match:
                         tree.insert("", tk.END, values=row)
 
     def add_selected_to_worklist(self):
@@ -798,6 +875,8 @@ class CNCManagerApp:
             self.work_list.append(work_item)
             added_count += 1
 
+        self.save_worklist_to_db()
+        self.filter_data()
         self.refresh_work_tree()
         self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste de fabrication.")
 
@@ -805,10 +884,18 @@ class CNCManagerApp:
         for r in self.tree_work.get_children():
             self.tree_work.delete(r)
 
-        query = self.search_var.get().strip().lower() if self.current_tab_key == "work" else ""
+        query = self.search_var.get().strip() if self.current_tab_key == "work" else ""
         selected_col_name = self.cmb_search_col.get() if self.current_tab_key == "work" else ""
         col_map = self.search_maps["work"]
         col_idx = col_map.get(selected_col_name, 1)
+
+        pattern = None
+        if query:
+            regex_str = "^" + re.escape(query).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+            try:
+                pattern = re.compile(regex_str, re.IGNORECASE)
+            except re.error:
+                pattern = None
 
         for idx, item in enumerate(self.work_list):
             prio = f"P{idx + 1}"
@@ -824,9 +911,19 @@ class CNCManagerApp:
                 item["block_density"]
             )
 
-            cell_val = str(vals[col_idx]).lower() if len(vals) > col_idx else ""
-            if not query or query in cell_val:
-                tags = () if item["block_num"] else ('missing_info',)
+            cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
+
+            is_match = False
+            if not query:
+                is_match = True
+            elif pattern:
+                is_match = bool(pattern.search(cell_val))
+            else:
+                is_match = query.lower() in cell_val.lower()
+
+            if is_match:
+                # Si le bloc n'est pas renseigné -> Tag ROUGE
+                tags = ('missing_info',) if not item["block_num"] else ()
                 self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
 
         autofit_treeview_columns(self.tree_work, self.work_cols)
@@ -838,6 +935,7 @@ class CNCManagerApp:
         idx = int(selected[0])
         if idx > 0:
             self.work_list[idx], self.work_list[idx - 1] = self.work_list[idx - 1], self.work_list[idx]
+            self.save_worklist_to_db()
             self.refresh_work_tree()
             self.tree_work.selection_set(str(idx - 1))
 
@@ -848,6 +946,7 @@ class CNCManagerApp:
         idx = int(selected[0])
         if idx < len(self.work_list) - 1:
             self.work_list[idx], self.work_list[idx + 1] = self.work_list[idx + 1], self.work_list[idx]
+            self.save_worklist_to_db()
             self.refresh_work_tree()
             self.tree_work.selection_set(str(idx + 1))
 
@@ -859,6 +958,8 @@ class CNCManagerApp:
 
         idx = int(selected[0])
         del self.work_list[idx]
+        self.save_worklist_to_db()
+        self.filter_data()
         self.refresh_work_tree()
 
     def edit_block_info(self):
@@ -906,6 +1007,7 @@ class CNCManagerApp:
             item["block_num"] = ent_num.get().strip()
             item["block_date"] = ent_date.get().strip()
             item["block_density"] = ent_density.get().strip()
+            self.save_worklist_to_db()
             self.refresh_work_tree()
             dlg.destroy()
 
@@ -913,6 +1015,63 @@ class CNCManagerApp:
         btn_box.pack(fill=tk.X)
         ttk.Button(btn_box, text="Valider", command=save_info).pack(side=tk.RIGHT, padx=5)
         ttk.Button(btn_box, text="Plus tard (Sauter)", command=dlg.destroy).pack(side=tk.RIGHT, padx=5)
+
+    def save_worklist_to_db(self):
+        """Enregistre la liste de travail courante dans SQLite pour éviter toute perte."""
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM current_worklist")
+            for idx, item in enumerate(self.work_list):
+                cursor.execute('''
+                    INSERT INTO current_worklist (prio, model, program, block_dim, tools, remarks, block_num, block_date, block_density)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    idx + 1, item["model"], item["program"], item["block_dim"],
+                    item["tools"], item["remarks"], item["block_num"],
+                    item["block_date"], item["block_density"]
+                ))
+            conn.commit()
+            conn.close()
+            now_str = datetime.now().strftime("%H:%M:%S")
+            self.statusbar.config(text=f" Liste sauvegardée en base de données à {now_str}.")
+        except Exception as e:
+            self.statusbar.config(text=f" Erreur lors de la sauvegarde : {e}")
+
+    def load_saved_worklist(self):
+        """Restaure la liste de travail enregistrée lors de la précédente session."""
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT model, program, block_dim, tools, remarks, block_num, block_date, block_density FROM current_worklist ORDER BY prio ASC")
+            rows = cursor.fetchall()
+            conn.close()
+
+            self.work_list = []
+            for r in rows:
+                self.work_list.append({
+                    "model": r[0],
+                    "program": r[1],
+                    "block_dim": r[2],
+                    "tools": r[3],
+                    "remarks": r[4],
+                    "block_num": r[5],
+                    "block_date": r[6],
+                    "block_density": r[7]
+                })
+        except Exception:
+            self.work_list = []
+
+    def start_auto_save_thread(self):
+        """Démarre une sauvegarde automatique toutes les 5 minutes (300 secondes)."""
+        def auto_save_loop():
+            while self.is_running:
+                time.sleep(300)
+                if self.is_running:
+                    self.save_worklist_to_db()
+
+        t = threading.Thread(target=auto_save_loop, daemon=True)
+        t.start()
 
     def validate_worklist(self):
         if not self.work_list:
@@ -923,7 +1082,7 @@ class CNCManagerApp:
 
         msg = f"Voulez-vous valider et enregistrer l'usinage de ces {len(self.work_list)} modèle(s) ?"
         if missing:
-            msg += f"\n\nNote : {len(missing)} modèle(s) n'ont pas encore leur N° de Bloc renseigné (affichés en rouge). La validation est tout de même autorisée."
+            msg += f"\n\nNote : {len(missing)} modèle(s) n'ont pas encore leur N° de Bloc renseigné (affichés en fond rouge). La validation est autorisée."
 
         if not messagebox.askyesno("Confirmation", msg):
             return
@@ -948,17 +1107,20 @@ class CNCManagerApp:
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Usinage du jour enregistré avec succès !")
+        messagebox.showinfo("Succès", "Usinage du jour validé et enregistré dans l'historique !")
         if self.user['role'] == 'ADMIN':
             self.load_history_data()
 
     def on_app_close(self):
+        self.is_running = False
+        self.save_worklist_to_db()
+
         missing_count = sum(1 for item in self.work_list if not item["block_num"])
         if missing_count > 0:
             resp = messagebox.askyesno(
                 "Données Incomplètes",
                 f"Attention : Vous avez {missing_count} modèle(s) dans votre liste du jour sans N°/ID Bloc renseigné (en rouge).\n\n"
-                "Voulez-vous vraiment quitter sans compléter ces informations ?"
+                "Vos tâches ont été sauvegardées. Voulez-vous vraiment quitter sans compléter ces informations ?"
             )
             if not resp:
                 return
