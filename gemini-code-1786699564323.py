@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v4.2.0"
+APP_VERSION = "v4.3.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -61,7 +61,6 @@ def init_db():
         )
     ''')
 
-    # Migration/Structure pour l'historique de traçabilité
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS machining_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +76,6 @@ def init_db():
         )
     ''')
 
-    # Ajustement dynamique des colonnes de la table historique si absentes
     cursor.execute("PRAGMA table_info(machining_history)")
     cols = [col[1] for col in cursor.fetchall()]
     if "pain_num" not in cols:
@@ -88,7 +86,6 @@ def init_db():
     if "pain_num" not in cols_work:
         cursor.execute("ALTER TABLE current_worklist ADD COLUMN pain_num TEXT DEFAULT ''")
 
-    # Génère ou met à jour le compte d'administration par défaut (admin / admin)
     cursor.execute('''
         INSERT INTO users (username, password, role)
         VALUES ('admin', 'admin', 'ADMIN')
@@ -356,9 +353,6 @@ class CNCManagerApp:
         self.work_list = []
         self.current_tab_key = "catalog"
 
-        # Dictionnaire pour le suivi du sens de tri des colonnes (Tri comme l'explorateur Windows)
-        self.sort_state = {}
-
         style = ttk.Style()
         style.configure("Treeview", rowheight=28)
 
@@ -446,20 +440,21 @@ class CNCManagerApp:
                 "Programme Pain": 2,
                 "Dimension Bloc": 3,
                 "N° / ID Bloc": 4,
-                "N° Pain (Noyau Polystyrène)": 5,
+                "N° Pain (Polystyrène)": 5,
                 "N° Outils": 6,
                 "Remarques": 7,
                 "Date Réception": 8,
                 "Densité (kg/m³)": 9
             },
             "history": {
+                "N°": 0,
                 "Opérateur": 1,
                 "Modèle": 2,
                 "Programme": 3,
                 "Dim. Bloc": 4,
                 "N° Bloc": 5,
                 "N° Pain": 6,
-                "Date Bloc": 7
+                "Date Réception": 7
             }
         }
 
@@ -486,9 +481,10 @@ class CNCManagerApp:
         self.notebook.add(self.tab_work, text="Ordre de Fabrication (Zone Opérateur)")
         self._setup_work_tree(self.tab_work)
 
+        # Seul l'administrateur accède à cette fenêtre, nommée "Historique Usinages"
         if self.user['role'] == 'ADMIN':
             self.tab_history = ttk.Frame(self.notebook)
-            self.notebook.add(self.tab_history, text="Historique Usinages (Admin)")
+            self.notebook.add(self.tab_history, text="Historique Usinages")
             self._setup_history_tree(self.tab_history)
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -526,7 +522,6 @@ class CNCManagerApp:
         for col, text in self.cat_cols.items():
             self.tree_cat.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_cat, _c, False))
 
-        # Style Gris permanent pour les modèles déjà sélectionnés dans la liste
         self.tree_cat.tag_configure('already_selected', background='#D0D0D0', foreground='#333333')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_cat.yview)
@@ -565,8 +560,8 @@ class CNCManagerApp:
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_work, _c, False))
 
-        # Tag Rouge pour informations manquantes
-        self.tree_work.tag_configure('missing_info', background='#E53935', foreground='white')
+        # Tag avec FOND ROUGE vif et texte blanc pour informations manquantes
+        self.tree_work.tag_configure('missing_info', background='#D32F2F', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_work.xview)
@@ -610,8 +605,8 @@ class CNCManagerApp:
         for col, text in self.hist_cols.items():
             self.tree_hist.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_hist, _c, False))
 
-        # Fond ROUGE pour les cases/lignes manquantes dans l'Historique
-        self.tree_hist.tag_configure('missing_info', background='#E53935', foreground='white')
+        # Tag avec FOND ROUGE vif et texte blanc pour informations manquantes
+        self.tree_hist.tag_configure('missing_info', background='#D32F2F', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_hist.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_hist.xview)
@@ -629,7 +624,6 @@ class CNCManagerApp:
         """Trie le tableau au clic sur l'entête de colonne (façon Explorateur Windows)."""
         data = [(tree.set(k, col), k) for k in tree.get_children('')]
 
-        # Essaie le tri numérique sinon trie par texte
         def convert(val):
             try:
                 return float(val[0].replace('P', ''))
@@ -641,7 +635,6 @@ class CNCManagerApp:
         for index, (val, k) in enumerate(data):
             tree.move(k, '', index)
 
-        # Bascule le sens de tri pour le prochain clic
         tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
 
     def import_csv(self):
@@ -727,17 +720,17 @@ class CNCManagerApp:
         self.filter_data()
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
 
+    def check_match(self, query_str, cell_value):
+        """Recherche souple prenant en compte les zéros au début (ex: '0', '012') et les sous-chaînes."""
+        if not query_str:
+            return True
+        q = str(query_str).strip().lower()
+        c = str(cell_value).strip().lower()
+        return q in c
+
     def filter_data(self):
         query = self.search_var.get().strip()
         selected_col_name = self.cmb_search_col.get()
-
-        pattern = None
-        if query:
-            regex_str = "^" + re.escape(query).replace(r"\*", ".*").replace(r"\?", ".") + "$"
-            try:
-                pattern = re.compile(regex_str, re.IGNORECASE)
-            except re.error:
-                pattern = None
 
         if self.current_tab_key == "catalog":
             tree = self.tree_cat
@@ -753,13 +746,10 @@ class CNCManagerApp:
                 for r in self.catalog_rows:
                     db_id = r[0]
                     display_values = r[1:]
-                    cell_val = str(display_values[col_idx]) if len(display_values) > col_idx and display_values[col_idx] else ""
+                    cell_val = str(display_values[col_idx]) if len(display_values) > col_idx and display_values[col_idx] is not None else ""
 
-                    is_match = not query or (pattern.search(cell_val) if pattern else query.lower() in cell_val.lower())
-
-                    if is_match:
+                    if self.check_match(query, cell_val):
                         model_name = display_values[0]
-                        # Applique le style GRIS si le modèle est déjà dans l'ordre de fabrication
                         tags = ('already_selected',) if model_name in selected_models else ()
                         tree.insert("", tk.END, iid=str(db_id), values=display_values, tags=tags)
 
@@ -776,14 +766,13 @@ class CNCManagerApp:
 
             if hasattr(self, 'history_rows'):
                 for row in self.history_rows:
-                    cell_val = str(row[col_idx]) if len(row) > col_idx and row[col_idx] else ""
+                    cell_val = str(row[col_idx]) if len(row) > col_idx and row[col_idx] is not None else ""
 
-                    is_match = not query or (pattern.search(cell_val) if pattern else query.lower() in cell_val.lower())
+                    if self.check_match(query, cell_val):
+                        # FOND ROUGE si information manquante
+                        block_val = str(row[5]).strip().upper() if len(row) > 5 else ""
+                        pain_val = str(row[6]).strip().upper() if len(row) > 6 else ""
 
-                    if is_match:
-                        # Fond rouge si Bloc ou Pain incomplet/non renseigné
-                        block_val = str(row[5]).upper() if len(row) > 5 else ""
-                        pain_val = str(row[6]).upper() if len(row) > 6 else ""
                         is_missing = ("NON" in block_val or not block_val) or ("NON" in pain_val or not pain_val)
                         tags = ('missing_info',) if is_missing else ()
                         tree.insert("", tk.END, values=row, tags=tags)
@@ -811,7 +800,7 @@ class CNCManagerApp:
             added_count += 1
 
         self.save_worklist_to_db()
-        self.load_catalog_data()  # Met à jour immédiatement l'affichage en Gris
+        self.load_catalog_data()
         self.refresh_work_tree()
         self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste de fabrication.")
 
@@ -823,14 +812,6 @@ class CNCManagerApp:
         selected_col_name = self.cmb_search_col.get() if self.current_tab_key == "work" else ""
         col_map = self.search_maps["work"]
         col_idx = col_map.get(selected_col_name, 1)
-
-        pattern = None
-        if query:
-            regex_str = "^" + re.escape(query).replace(r"\*", ".*").replace(r"\?", ".") + "$"
-            try:
-                pattern = re.compile(regex_str, re.IGNORECASE)
-            except re.error:
-                pattern = None
 
         for idx, item in enumerate(self.work_list):
             prio = f"P{idx + 1}"
@@ -847,13 +828,11 @@ class CNCManagerApp:
                 item["block_density"]
             )
 
-            cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
+            cell_val = str(vals[col_idx]) if len(vals) > col_idx and vals[col_idx] is not None else ""
 
-            is_match = not query or (pattern.search(cell_val) if pattern else query.lower() in cell_val.lower())
-
-            if is_match:
-                # Fond ROUGE si l'une des infos obligatoires est absente
-                is_missing = (not item["block_num"]) or (not item.get("pain_num"))
+            if self.check_match(query, cell_val):
+                # FOND ROUGE si information manquante
+                is_missing = (not item["block_num"]) or (not item.get("pain_num")) or (item["block_num"] == "NON RENSEIGNÉ") or (item.get("pain_num") == "NON RENSEIGNÉ")
                 tags = ('missing_info',) if is_missing else ()
                 self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
 
@@ -890,7 +869,7 @@ class CNCManagerApp:
         idx = int(selected[0])
         del self.work_list[idx]
         self.save_worklist_to_db()
-        self.load_catalog_data()  # Libère le surlignage gris dans le catalogue
+        self.load_catalog_data()
         self.refresh_work_tree()
 
     def edit_block_info(self):
