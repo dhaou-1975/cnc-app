@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v3.8.0"
+APP_VERSION = "v3.9.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -55,11 +55,6 @@ def init_db():
         )
     ''')
 
-    try:
-        cursor.execute("ALTER TABLE machining_history ADD COLUMN block_dim TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-
     conn.commit()
     conn.close()
 
@@ -71,22 +66,6 @@ def get_user_count():
     count = cursor.fetchone()[0]
     conn.close()
     return count
-
-
-def match_wildcard(pattern, text):
-    if not pattern or pattern.strip() == "":
-        return True
-    
-    text = str(text) if text is not None else ""
-    pattern = pattern.strip()
-    
-    if '*' in pattern:
-        cleaned_pattern = pattern.strip('*')
-        if cleaned_pattern:
-            return cleaned_pattern.lower() in text.lower()
-        return True
-    else:
-        return pattern.lower() in text.lower()
 
 
 def autofit_treeview_columns(tree, columns_dict):
@@ -204,10 +183,6 @@ class AddModelDialog(tk.Toplevel):
             conn.close()
             return
 
-        if not messagebox.askyesno("Confirmation", f"Voulez-vous vraiment enregistrer le modèle '{m_name}' ?"):
-            conn.close()
-            return
-
         vals = tuple(self.entries[k].get().strip() for k in [
             "model_name", "program_name", "block_dim", "qty_per_block",
             "z_between_boards", "tools", "caisson", "plaque_gamma", "plaque_beta", "remarks"
@@ -245,7 +220,6 @@ class DeleteModelDialog(tk.Toplevel):
         
         ent_s = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
         ent_s.pack(side=tk.LEFT, padx=5)
-        ent_s.bind("<KeyRelease>", lambda e: self.filter_delete_list())
 
         ttk.Label(search_frame, text="Dans :").pack(side=tk.LEFT, padx=5)
         self.cmb_col = ttk.Combobox(search_frame, values=["Nom Modèle", "Programme Pain"], state="readonly", width=18)
@@ -287,22 +261,40 @@ class DeleteModelDialog(tk.Toplevel):
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT id, model_name, program_name, block_dim, tools FROM models_catalog")
-        for row in cursor.fetchall():
-            self.tree_del.insert("", tk.END, values=row)
+        self.all_rows = cursor.fetchall()
         conn.close()
 
+        self.filter_delete_list()
+
     def filter_delete_list(self):
-        query = self.search_var.get().strip()
+        query = self.search_var.get().strip().lower()
         col_idx = 1 if self.cmb_col.get() == "Nom Modèle" else 2
 
         for item in self.tree_del.get_children():
-            vals = self.tree_del.item(item, "values")
-            cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
+            self.tree_del.delete(item)
 
-            if match_wildcard(query, cell_val):
-                self.tree_del.reattach(item, "", tk.END)
-            else:
-                self.tree_del.detach(item)
+        for row in self.all_rows:
+            cell_val = str(row[col_idx]).lower() if row[col_idx] else ""
+            if not query or query in cell_val:
+                self.tree_del.insert("", tk.END, values=row)
+
+    def delete_selected(self):
+        selected = self.tree_del.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Veuillez sélectionner au moins un modèle à supprimer.")
+            return
+
+        if messagebox.askyesno("Confirmation", f"Voulez-vous vraiment supprimer ces {len(selected)} modèle(s) ?"):
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            for item in selected:
+                model_id = self.tree_del.item(item, "values")[0]
+                cursor.execute("DELETE FROM models_catalog WHERE id=?", (model_id,))
+            conn.commit()
+            conn.close()
+
+            self.load_data()
+            self.main_app.load_catalog_data()
 
 
 class UserManagementDialog(tk.Toplevel):
@@ -328,7 +320,6 @@ class UserManagementDialog(tk.Toplevel):
 
         frame_actions = ttk.Frame(frame_list, padding=5)
         frame_actions.pack(side=tk.RIGHT, fill=tk.Y)
-        ttk.Button(frame_actions, text="Modifier", command=self.edit_user).pack(fill=tk.X, pady=5)
         ttk.Button(frame_actions, text="- Supprimer", command=self.delete_user).pack(fill=tk.X, pady=5)
 
         frame_form = ttk.LabelFrame(self, text=" Saisie Utilisateur ", padding=10)
@@ -408,52 +399,6 @@ class UserManagementDialog(tk.Toplevel):
             conn.close()
             self.load_users()
 
-    def edit_user(self):
-        selected = self.tree_users.selection()
-        if not selected:
-            messagebox.showwarning("Attention", "Sélectionnez un utilisateur à modifier.")
-            return
-
-        user_id, username, current_role = self.tree_users.item(selected[0], "values")
-
-        dlg = tk.Toplevel(self)
-        dlg.title(f"Modifier {username}")
-        dlg.geometry("320x200")
-        dlg.grab_set()
-
-        ttk.Label(dlg, text=f"Modification de : {username}", font=("Arial", 10, "bold")).pack(pady=10)
-
-        frame = ttk.Frame(dlg, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(frame, text="Nouveau M.Passe :").grid(row=0, column=0, sticky=tk.W, pady=2)
-        ent_new_p = ttk.Entry(frame, show="*")
-        ent_new_p.grid(row=1, column=0, sticky=tk.EW, pady=5)
-
-        ttk.Label(frame, text="Rôle :").grid(row=2, column=0, sticky=tk.W, pady=2)
-        cmb_new_r = ttk.Combobox(frame, values=["OPERATEUR", "ADMIN"], state="readonly")
-        cmb_new_r.set(current_role)
-        cmb_new_r.grid(row=3, column=0, sticky=tk.EW, pady=5)
-
-        def save_edits():
-            new_pwd = ent_new_p.get().strip()
-            new_role = cmb_new_r.get()
-
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-
-            if new_pwd:
-                cursor.execute("UPDATE users SET password=?, role=? WHERE id=?", (new_pwd, new_role, user_id))
-            else:
-                cursor.execute("UPDATE users SET role=? WHERE id=?", (new_role, user_id))
-
-            conn.commit()
-            conn.close()
-            dlg.destroy()
-            self.load_users()
-
-        ttk.Button(dlg, text="Enregistrer", command=save_edits).pack(pady=10)
-
 
 class CNCManagerApp:
     def __init__(self, root, current_user):
@@ -462,8 +407,10 @@ class CNCManagerApp:
         self.root.title(f"{APP_NAME} - Connecté : {self.user['username']} [{self.user['role']}]")
         self.root.geometry("1280x780")
 
-        self.red_flagged_items = set()
         self.work_list = []
+        self.current_tab_key = "catalog"
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
         self._create_menu()
         self._create_header()
@@ -479,9 +426,9 @@ class CNCManagerApp:
         file_menu = tk.Menu(menubar, tearoff=0)
         if self.user['role'] == 'ADMIN':
             file_menu.add_command(label="Importer Fichier CSV...", command=self.import_csv)
-        file_menu.add_command(label="Actualiser", command=self.load_catalog_data)
+        file_menu.add_command(label="Actualiser", command=self.refresh_all_data)
         file_menu.add_separator()
-        file_menu.add_command(label="Quitter", command=self.root.quit)
+        file_menu.add_command(label="Quitter", command=self.on_app_close)
         menubar.add_cascade(label="Fichier", menu=file_menu)
 
         tools_menu = tk.Menu(menubar, tearoff=0)
@@ -513,7 +460,7 @@ class CNCManagerApp:
         if self.user['role'] == 'ADMIN':
             ttk.Button(toolbar, text="Importer CSV", command=self.import_csv).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(toolbar, text="Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Actualiser", command=self.refresh_all_data).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(toolbar, text="Rechercher :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
 
@@ -522,7 +469,6 @@ class CNCManagerApp:
         
         self.ent_search = ttk.Entry(toolbar, textvariable=self.search_var, width=25)
         self.ent_search.pack(side=tk.LEFT, padx=5)
-        self.ent_search.bind("<KeyRelease>", lambda e: self.filter_data())
 
         ttk.Label(toolbar, text="Dans :").pack(side=tk.LEFT, padx=(10, 5))
 
@@ -621,8 +567,6 @@ class CNCManagerApp:
         for col, text in self.cat_cols.items():
             self.tree_cat.heading(col, text=text)
 
-        self.tree_cat.tag_configure('red_flag', background='#ff7675', foreground='white')
-
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_cat.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
         self.tree_cat.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -631,7 +575,6 @@ class CNCManagerApp:
         self.tree_cat.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.tree_cat.bind("<Button-3>", self.show_context_menu)
         self.tree_cat.bind("<Double-1>", lambda e: self.add_selected_to_worklist())
 
         btn_bar = ttk.Frame(parent, padding=5)
@@ -659,7 +602,7 @@ class CNCManagerApp:
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text)
 
-        self.tree_work.tag_configure('missing_info', background='#ff7675', foreground='white')
+        self.tree_work.tag_configure('missing_info', background='#FF7675', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_work.xview)
@@ -764,6 +707,13 @@ class CNCManagerApp:
         except Exception as e:
             messagebox.showerror("Erreur Importation", f"Erreur lors de la lecture du fichier :\n{e}")
 
+    def refresh_all_data(self):
+        self.search_var.set("")
+        self.load_catalog_data()
+        self.refresh_work_tree()
+        if self.user['role'] == 'ADMIN':
+            self.load_history_data()
+
     def load_catalog_data(self):
         for row in self.tree_cat.get_children():
             self.tree_cat.delete(row)
@@ -771,18 +721,11 @@ class CNCManagerApp:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT id, model_name, program_name, block_dim, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks FROM models_catalog")
-        rows = cursor.fetchall()
+        self.catalog_rows = cursor.fetchall()
         conn.close()
 
-        for r in rows:
-            db_id = r[0]
-            display_values = r[1:]
-            tags = ('red_flag',) if db_id in self.red_flagged_items else ()
-            self.tree_cat.insert("", tk.END, iid=str(db_id), values=display_values, tags=tags)
-
+        self.filter_data()
         autofit_treeview_columns(self.tree_cat, self.cat_cols)
-        if hasattr(self, 'tree_hist'):
-            self.load_history_data()
 
     def load_history_data(self):
         for r in self.tree_hist.get_children():
@@ -791,63 +734,48 @@ class CNCManagerApp:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT id, operator_username, model_name, program_name, block_dim, block_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
-        for row in cursor.fetchall():
-            self.tree_hist.insert("", tk.END, values=row)
+        self.history_rows = cursor.fetchall()
         conn.close()
+
+        self.filter_data()
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
 
     def filter_data(self):
-        query = self.search_var.get().strip()
+        query = self.search_var.get().strip().lower()
         selected_col_name = self.cmb_search_col.get()
 
         if self.current_tab_key == "catalog":
             tree = self.tree_cat
             col_map = self.search_maps["catalog"]
+            col_idx = col_map.get(selected_col_name, 0)
+            
+            for item in tree.get_children():
+                tree.delete(item)
+
+            if hasattr(self, 'catalog_rows'):
+                for r in self.catalog_rows:
+                    db_id = r[0]
+                    display_values = r[1:]
+                    cell_val = str(display_values[col_idx]).lower() if len(display_values) > col_idx and display_values[col_idx] else ""
+                    if not query or query in cell_val:
+                        tree.insert("", tk.END, iid=str(db_id), values=display_values)
+
         elif self.current_tab_key == "work":
-            tree = self.tree_work
-            col_map = self.search_maps["work"]
-        else:
+            self.refresh_work_tree()
+
+        elif self.current_tab_key == "history" and self.user['role'] == 'ADMIN':
             tree = self.tree_hist
             col_map = self.search_maps["history"]
+            col_idx = col_map.get(selected_col_name, 1)
 
-        col_idx = col_map.get(selected_col_name, 0)
+            for item in tree.get_children():
+                tree.delete(item)
 
-        for item in tree.get_children():
-            vals = tree.item(item, "values")
-            cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
-
-            if match_wildcard(query, cell_val):
-                tree.reattach(item, "", tk.END)
-            else:
-                tree.detach(item)
-
-    def show_context_menu(self, event):
-        item_id = self.tree_cat.identify_row(event.y)
-        if not item_id:
-            return
-
-        if item_id not in self.tree_cat.selection():
-            self.tree_cat.selection_set(item_id)
-
-        menu = tk.Menu(self.root, tearoff=0)
-        db_id = int(item_id)
-
-        if db_id in self.red_flagged_items:
-            menu.add_command(label="Retirer Marqueur Rouge", command=lambda: self.toggle_red_flag(db_id, False))
-        else:
-            menu.add_command(label="Marquer en Rouge (Alerte)", command=lambda: self.toggle_red_flag(db_id, True))
-
-        menu.add_separator()
-        menu.add_command(label="+ Ajouter à ma Liste du Jour", command=self.add_selected_to_worklist)
-        menu.post(event.x_root, event.y_root)
-
-    def toggle_red_flag(self, db_id, add_flag):
-        if add_flag:
-            self.red_flagged_items.add(db_id)
-            self.tree_cat.item(str(db_id), tags=('red_flag',))
-        else:
-            self.red_flagged_items.discard(db_id)
-            self.tree_cat.item(str(db_id), tags=())
+            if hasattr(self, 'history_rows'):
+                for row in self.history_rows:
+                    cell_val = str(row[col_idx]).lower() if len(row) > col_idx and row[col_idx] else ""
+                    if not query or query in cell_val:
+                        tree.insert("", tk.END, values=row)
 
     def add_selected_to_worklist(self):
         selected = self.tree_cat.selection()
@@ -872,11 +800,15 @@ class CNCManagerApp:
 
         self.refresh_work_tree()
         self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste de fabrication.")
-        messagebox.showinfo("Ordre de Fabrication", f"{added_count} modèle(s) ajouté(s) à la liste du jour.\n\nNote : Pensez à renseigner le N° de Bloc avant la validation finale.")
 
     def refresh_work_tree(self):
         for r in self.tree_work.get_children():
             self.tree_work.delete(r)
+
+        query = self.search_var.get().strip().lower() if self.current_tab_key == "work" else ""
+        selected_col_name = self.cmb_search_col.get() if self.current_tab_key == "work" else ""
+        col_map = self.search_maps["work"]
+        col_idx = col_map.get(selected_col_name, 1)
 
         for idx, item in enumerate(self.work_list):
             prio = f"P{idx + 1}"
@@ -891,8 +823,11 @@ class CNCManagerApp:
                 item["block_date"],
                 item["block_density"]
             )
-            tags = () if item["block_num"] else ('missing_info',)
-            self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
+
+            cell_val = str(vals[col_idx]).lower() if len(vals) > col_idx else ""
+            if not query or query in cell_val:
+                tags = () if item["block_num"] else ('missing_info',)
+                self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
 
         autofit_treeview_columns(self.tree_work, self.work_cols)
 
@@ -985,14 +920,12 @@ class CNCManagerApp:
             return
 
         missing = [item["model"] for item in self.work_list if not item["block_num"]]
-        if missing:
-            messagebox.showerror(
-                "Informations Manquantes (Fond Rouge)",
-                f"Validation impossible ! Veuillez renseigner le 'N° / ID Bloc' pour les modèles suivants :\n- " + "\n- ".join(missing)
-            )
-            return
 
-        if not messagebox.askyesno("Confirmation", f"Voulez-vous valider et enregistrer l'usinage de ces {len(self.work_list)} modèle(s) ?"):
+        msg = f"Voulez-vous valider et enregistrer l'usinage de ces {len(self.work_list)} modèle(s) ?"
+        if missing:
+            msg += f"\n\nNote : {len(missing)} modèle(s) n'ont pas encore leur N° de Bloc renseigné (affichés en rouge). La validation est tout de même autorisée."
+
+        if not messagebox.askyesno("Confirmation", msg):
             return
 
         conn = sqlite3.connect(DB_FILE)
@@ -1007,7 +940,7 @@ class CNCManagerApp:
                 item["model"],
                 item["program"],
                 item["block_dim"],
-                item["block_num"],
+                item["block_num"] if item["block_num"] else "NON RENSEIGNÉ",
                 item["block_date"],
                 item["block_density"]
             ))
@@ -1015,11 +948,21 @@ class CNCManagerApp:
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Travail du jour validé et enregistré dans l'historique !")
-        self.work_list.clear()
-        self.refresh_work_tree()
+        messagebox.showinfo("Succès", "Usinage du jour enregistré avec succès !")
         if self.user['role'] == 'ADMIN':
             self.load_history_data()
+
+    def on_app_close(self):
+        missing_count = sum(1 for item in self.work_list if not item["block_num"])
+        if missing_count > 0:
+            resp = messagebox.askyesno(
+                "Données Incomplètes",
+                f"Attention : Vous avez {missing_count} modèle(s) dans votre liste du jour sans N°/ID Bloc renseigné (en rouge).\n\n"
+                "Voulez-vous vraiment quitter sans compléter ces informations ?"
+            )
+            if not resp:
+                return
+        self.root.destroy()
 
 
 def main():
