@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v3.4.0"
+APP_VERSION = "v3.5.0"
 DB_FILE = "cnc_factory.db"
 
 
@@ -29,7 +29,7 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS models_catalog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            model_name TEXT NOT NULL,
+            model_name TEXT NOT NULL UNIQUE,
             program_name TEXT NOT NULL,
             block_dim TEXT,
             block_dim_bought TEXT,
@@ -76,9 +76,12 @@ def get_user_count():
 
 
 def match_wildcard(pattern, text):
-    """Gère la recherche avec wildcard (*) exemple: PAD* ou *85"""
-    if not pattern:
+    """Gère la recherche avec wildcard (*) et tolère la chaîne vide."""
+    if not pattern or pattern.strip() == "":
         return True
+    
+    text = str(text) if text is not None else ""
+    
     if '*' in pattern:
         regex_pattern = '^' + re.escape(pattern).replace(r'\*', '.*') + '$'
         return bool(re.search(regex_pattern, text, re.IGNORECASE))
@@ -132,6 +135,188 @@ class LoginDialog(tk.Toplevel):
             self.destroy()
         else:
             messagebox.showerror("Erreur", "Nom d'utilisateur ou mot de passe incorrect.")
+
+
+class AddModelDialog(tk.Toplevel):
+    def __init__(self, parent, main_app):
+        super().__init__(parent)
+        self.main_app = main_app
+        self.title("Ajouter un Nouveau Modèle")
+        self.geometry("520x480")
+        self.resizable(False, False)
+        self.grab_set()
+
+        ttk.Label(self, text="Nouveau Modèle au Catalogue", font=("Arial", 12, "bold")).pack(pady=10)
+
+        frame = ttk.Frame(self, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        fields = [
+            ("Nom Modèle * :", "model_name", 35),
+            ("Nom Programme Pain * :", "program_name", 35),
+            ("Dimension Bloc :", "block_dim", 35),
+            ("Qté par Bloc :", "qty_per_block", 15),
+            ("Z entre 2 Pains :", "z_between_boards", 15),
+            ("Outils :", "tools", 30),
+            ("Caisson :", "caisson", 20),
+            ("Plaque Gamma :", "plaque_gamma", 20),
+            ("Plaque Beta :", "plaque_beta", 20),
+            ("Remarques :", "remarks", 35)
+        ]
+
+        self.entries = {}
+        for idx, (label, key, width) in enumerate(fields):
+            ttk.Label(frame, text=label).grid(row=idx, column=0, sticky=tk.W, pady=3)
+            ent = ttk.Entry(frame, width=width)
+            ent.grid(row=idx, column=1, sticky=tk.W, pady=3, padx=5)
+            self.entries[key] = ent
+
+        btn_box = ttk.Frame(self, padding=10)
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="💾 Enregistrer Modèle", command=self.save_model).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_box, text="Annuler", command=self.destroy).pack(side=tk.RIGHT)
+
+    def save_model(self):
+        m_name = self.entries["model_name"].get().strip()
+        p_name = self.entries["program_name"].get().strip()
+
+        if not m_name or not p_name:
+            messagebox.showwarning("Champs requis", "Le 'Nom Modèle' et le 'Nom Programme' sont obligatoires.")
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM models_catalog WHERE LOWER(model_name) = LOWER(?)", (m_name,))
+        if cursor.fetchone():
+            messagebox.showerror("Modèle Existant", f"Le modèle '{m_name}' existe déjà dans le catalogue !")
+            conn.close()
+            return
+
+        if not messagebox.askyesno("Confirmation", f"Voulez-vous vraiment enregistrer le modèle '{m_name}' ?"):
+            conn.close()
+            return
+
+        vals = tuple(self.entries[k].get().strip() for k in [
+            "model_name", "program_name", "block_dim", "qty_per_block",
+            "z_between_boards", "tools", "caisson", "plaque_gamma", "plaque_beta", "remarks"
+        ])
+
+        cursor.execute('''
+            INSERT INTO models_catalog (model_name, program_name, block_dim, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', vals)
+
+        conn.commit()
+        conn.close()
+
+        messagebox.showinfo("Succès", f"Le modèle '{m_name}' a été ajouté au catalogue.")
+        self.main_app.load_catalog_data()
+        self.destroy()
+
+
+class DeleteModelDialog(tk.Toplevel):
+    def __init__(self, parent, main_app):
+        super().__init__(parent)
+        self.main_app = main_app
+        self.title("Supprimer des Modèles")
+        self.geometry("850x500")
+        self.grab_set()
+
+        ttk.Label(self, text="Recherche & Suppression de Modèles", font=("Arial", 12, "bold")).pack(pady=5)
+
+        # Zone de recherche intégrée
+        search_frame = ttk.Frame(self, padding=5)
+        search_frame.pack(fill=tk.X)
+
+        ttk.Label(search_frame, text="Rechercher (* autorisée) :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", lambda *args: self.filter_delete_list())
+        ttk.Entry(search_frame, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(search_frame, text="Dans :").pack(side=tk.LEFT, padx=5)
+        self.cmb_col = ttk.Combobox(search_frame, values=["Nom Modèle", "Programme Pain"], state="readonly", width=18)
+        self.cmb_col.set("Nom Modèle")
+        self.cmb_col.pack(side=tk.LEFT, padx=5)
+        self.cmb_col.bind("<<ComboboxSelected>>", lambda e: self.filter_delete_list())
+
+        # Tableau des résultats
+        tree_frame = ttk.Frame(self, padding=5)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("id", "model", "program", "dim_block", "tools")
+        self.tree_del = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+
+        self.tree_del.heading("id", text="ID")
+        self.tree_del.heading("model", text="Nom Modèle")
+        self.tree_del.heading("program", text="Programme")
+        self.tree_del.heading("dim_block", text="Dim. Bloc")
+        self.tree_del.heading("tools", text="Outils")
+
+        self.tree_del.column("id", width=40, anchor=tk.CENTER)
+        self.tree_del.column("model", width=200)
+        self.tree_del.column("program", width=200)
+        self.tree_del.column("dim_block", width=180)
+        self.tree_del.column("tools", width=150)
+
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree_del.yview)
+        self.tree_del.configure(yscrollcommand=vsb.set)
+
+        self.tree_del.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        btn_box = ttk.Frame(self, padding=10)
+        btn_box.pack(fill=tk.X)
+        ttk.Button(btn_box, text="🗑️ Supprimer la sélection", command=self.delete_selected).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_box, text="Fermer", command=self.destroy).pack(side=tk.RIGHT)
+
+        self.load_data()
+
+    def load_data(self):
+        for r in self.tree_del.get_children():
+            self.tree_del.delete(r)
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, model_name, program_name, block_dim, tools FROM models_catalog")
+        for row in cursor.fetchall():
+            self.tree_del.insert("", tk.END, values=row)
+        conn.close()
+
+    def filter_delete_list(self):
+        query = self.search_var.get().strip()
+        col_idx = 1 if self.cmb_col.get() == "Nom Modèle" else 2
+
+        for item in self.tree_del.get_children():
+            vals = self.tree_del.item(item, "values")
+            cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
+
+            if match_wildcard(query, cell_val):
+                self.tree_del.reattach(item, "", tk.END)
+            else:
+                self.tree_del.detach(item)
+
+    def delete_selected(self):
+        selected = self.tree_del.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Veuillez sélectionner au moins un modèle à supprimer.")
+            return
+
+        models_to_del = [self.tree_del.item(s, "values") for s in selected]
+        names = ", ".join([m[1] for m in models_to_del])
+
+        if not messagebox.askyesno("Confirmation", f"Voulez-vous vraiment supprimer définitivement ces {len(models_to_del)} modèle(s) ?\n\n({names})"):
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        for m in models_to_del:
+            cursor.execute("DELETE FROM models_catalog WHERE id=?", (m[0],))
+        conn.commit()
+        conn.close()
+
+        messagebox.showinfo("Succès", "Modèle(s) supprimé(s) du catalogue.")
+        self.load_data()
+        self.main_app.load_catalog_data()
 
 
 class UserManagementDialog(tk.Toplevel):
@@ -259,7 +444,7 @@ class UserManagementDialog(tk.Toplevel):
         frame = ttk.Frame(dlg, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="Nouveau M.Passe (si changement) :").grid(row=0, column=0, sticky=tk.W, pady=2)
+        ttk.Label(frame, text="Nouveau M.Passe :").grid(row=0, column=0, sticky=tk.W, pady=2)
         ent_new_p = ttk.Entry(frame, show="*")
         ent_new_p.grid(row=1, column=0, sticky=tk.EW, pady=5)
 
@@ -292,88 +477,6 @@ class UserManagementDialog(tk.Toplevel):
         ttk.Button(dlg, text="Enregistrer", command=save_edits).pack(pady=10)
 
 
-class AddEditModelDialog(tk.Toplevel):
-    def __init__(self, parent, model_id=None):
-        super().__init__(parent)
-        self.model_id = model_id
-        self.parent_app = parent
-        self.title("Nouveau Modèle" if not model_id else f"Modifier Modèle N°{model_id}")
-        self.geometry("450x520")
-        self.grab_set()
-
-        frame = ttk.Frame(self, padding=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        fields = [
-            ("Nom Modèle *", "model_name"),
-            ("Nom Programme Pain *", "program_name"),
-            ("Dimension Bloc", "block_dim"),
-            ("Dimension Bloc (Acheté)", "block_dim_bought"),
-            ("Qté par Bloc", "qty_per_block"),
-            ("Z entre 2 Pains", "z_between_boards"),
-            ("Outils", "tools"),
-            ("Caisson", "caisson"),
-            ("Plaque Gamma", "plaque_gamma"),
-            ("Plaque Beta", "plaque_beta"),
-            ("Remarques", "remarks")
-        ]
-
-        self.entries = {}
-        for idx, (label, key) in enumerate(fields):
-            ttk.Label(frame, text=label).grid(row=idx, column=0, sticky=tk.W, pady=3)
-            ent = ttk.Entry(frame, width=30)
-            ent.grid(row=idx, column=1, sticky=tk.EW, pady=3)
-            self.entries[key] = ent
-
-        ttk.Button(frame, text="Enregistrer", command=self.save_model).grid(row=len(fields), column=1, pady=15, sticky=tk.E)
-
-        if self.model_id:
-            self.load_model_data()
-
-    def load_model_data(self):
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks FROM models_catalog WHERE id=?", (self.model_id,))
-        row = cursor.fetchone()
-        conn.close()
-
-        if row:
-            keys = ["model_name", "program_name", "block_dim", "block_dim_bought", "qty_per_block", "z_between_boards", "tools", "caisson", "plaque_gamma", "plaque_beta", "remarks"]
-            for k, val in zip(keys, row):
-                if val:
-                    self.entries[k].insert(0, str(val))
-
-    def save_model(self):
-        vals = {k: self.entries[k].get().strip() for k in self.entries}
-
-        if not vals["model_name"] or not vals["program_name"]:
-            messagebox.showwarning("Erreur", "Le nom du modèle et du programme sont obligatoires.")
-            return
-
-        if not messagebox.askyesno("Confirmation", "Voulez-vous enregistrer ce modèle dans le catalogue ?"):
-            return
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-
-        if not self.model_id:
-            cursor.execute('''
-                INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', tuple(vals.values()))
-        else:
-            cursor.execute('''
-                UPDATE models_catalog SET model_name=?, program_name=?, block_dim=?, block_dim_bought=?, qty_per_block=?, z_between_boards=?, tools=?, caisson=?, plaque_gamma=?, plaque_beta=?, remarks=?
-                WHERE id=?
-            ''', (*vals.values(), self.model_id))
-
-        conn.commit()
-        conn.close()
-        messagebox.showinfo("Succès", "Modèle enregistré avec succès.")
-        self.parent_app.load_catalog_data()
-        self.destroy()
-
-
 class CNCManagerApp:
     def __init__(self, root, current_user):
         self.root = root
@@ -395,6 +498,7 @@ class CNCManagerApp:
     def _create_menu(self):
         menubar = tk.Menu(self.root)
 
+        # Menu Fichier
         file_menu = tk.Menu(menubar, tearoff=0)
         if self.user['role'] == 'ADMIN':
             file_menu.add_command(label="Importer Fichier CSV...", command=self.import_csv)
@@ -403,10 +507,16 @@ class CNCManagerApp:
         file_menu.add_command(label="Quitter", command=self.root.quit)
         menubar.add_cascade(label="Fichier", menu=file_menu)
 
+        # Nouveau Menu Outils
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(label="➕ Ajouter un Modèle", command=lambda: AddModelDialog(self.root, self))
+        tools_menu.add_command(label="🗑️ Supprimer un Modèle", command=lambda: DeleteModelDialog(self.root, self))
+        menubar.add_cascade(label="Outils", menu=tools_menu)
+
+        # Menu Administration
         if self.user['role'] == 'ADMIN':
             admin_menu = tk.Menu(menubar, tearoff=0)
             admin_menu.add_command(label="Gestion Utilisateurs", command=lambda: UserManagementDialog(self.root))
-            admin_menu.add_command(label="Nouveau Modèle", command=lambda: AddEditModelDialog(self))
             menubar.add_cascade(label="Administration", menu=admin_menu)
 
         self.root.config(menu=menubar)
@@ -426,14 +536,13 @@ class CNCManagerApp:
         toolbar.pack(fill=tk.X)
 
         if self.user['role'] == 'ADMIN':
-            ttk.Button(toolbar, text="📥 Importer Fichier (CSV)", command=self.import_csv).pack(side=tk.LEFT, padx=5)
+            ttk.Button(toolbar, text="📥 Importer CSV", command=self.import_csv).pack(side=tk.LEFT, padx=5)
 
         ttk.Button(toolbar, text="🔄 Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(toolbar, text="Rechercher (* autorisée) :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(20, 5))
 
         self.search_var = tk.StringVar()
-        # Triggers instant filter update on any change
         self.search_var.trace_add("write", lambda *args: self.filter_data())
         ttk.Entry(toolbar, textvariable=self.search_var, width=25).pack(side=tk.LEFT, padx=5)
 
@@ -461,12 +570,12 @@ class CNCManagerApp:
         self.notebook.add(self.tab_catalog, text="📋 Catalogue Modèles")
         self._setup_catalog_tree(self.tab_catalog)
 
-        # Onglet Poste Opérateur
+        # Onglet Ordre de Fabrication
         self.tab_work = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_work, text="🛠️ Ordre de Fabrication (Mon Travail du Jour)")
         self._setup_work_tree(self.tab_work)
 
-        # Onglet Historique (EXCLUSIF ADMIN)
+        # Onglet Historique (Admin)
         if self.user['role'] == 'ADMIN':
             self.tab_history = ttk.Frame(self.notebook)
             self.notebook.add(self.tab_history, text="📜 Historique Usinages (Admin)")
@@ -509,68 +618,9 @@ class CNCManagerApp:
         self.tree_cat.bind("<Button-3>", self.show_context_menu)
         self.tree_cat.bind("<Double-1>", lambda e: self.add_selected_to_worklist())
 
-        # Barre de Saisie Manuelle en bas du catalogue
-        frame_quick_add = ttk.LabelFrame(parent, text=" ➕ Saisie Manuelle Rapide Modèle (Bas de Catalogue) ", padding=5)
-        frame_quick_add.pack(fill=tk.X, padx=5, pady=5)
-
-        self.quick_add_entries = {}
-        fields_short = [
-            ("Modèle*", "model_name", 12),
-            ("Prog*", "program_name", 12),
-            ("Dim.Bloc", "block_dim", 12),
-            ("Qté", "qty_per_block", 5),
-            ("Z", "z_between_boards", 5),
-            ("Outils", "tools", 10),
-            ("Caisson", "caisson", 8),
-            ("Gamma", "plaque_gamma", 8),
-            ("Beta", "plaque_beta", 8),
-            ("Remarques", "remarks", 12)
-        ]
-
-        for idx, (lbl, key, width) in enumerate(fields_short):
-            ttk.Label(frame_quick_add, text=lbl, font=("Arial", 8)).grid(row=0, column=idx, padx=2)
-            ent = ttk.Entry(frame_quick_add, width=width)
-            ent.grid(row=1, column=idx, padx=2, pady=2)
-            self.quick_add_entries[key] = ent
-
-        btn_quick_add = ttk.Button(frame_quick_add, text="➕ Ajouter au Catalogue", command=self.quick_add_model)
-        btn_quick_add.grid(row=1, column=len(fields_short), padx=8, pady=2)
-
         btn_bar = ttk.Frame(parent, padding=5)
         btn_bar.pack(fill=tk.X)
         ttk.Button(btn_bar, text="➕ Ajouter les modèles sélectionnés à ma Liste du Jour", command=self.add_selected_to_worklist).pack(side=tk.RIGHT)
-
-    def quick_add_model(self):
-        """Permet l'ajout rapide d'un modèle via les champs en bas du catalogue"""
-        m_name = self.quick_add_entries["model_name"].get().strip()
-        p_name = self.quick_add_entries["program_name"].get().strip()
-
-        if not m_name or not p_name:
-            messagebox.showwarning("Attention", "Les champs 'Modèle' et 'Prog' sont obligatoires.")
-            return
-
-        if not messagebox.askyesno("Confirmation", f"Voulez-vous ajouter le modèle '{m_name}' au catalogue ?"):
-            return
-
-        vals = [self.quick_add_entries[k].get().strip() for k in [
-            "model_name", "program_name", "block_dim", "qty_per_block",
-            "z_between_boards", "tools", "caisson", "plaque_gamma", "plaque_beta", "remarks"
-        ]]
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO models_catalog (model_name, program_name, block_dim, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', tuple(vals))
-        conn.commit()
-        conn.close()
-
-        for ent in self.quick_add_entries.values():
-            ent.delete(0, tk.END)
-
-        messagebox.showinfo("Succès", "Modèle ajouté au catalogue.")
-        self.load_catalog_data()
 
     def _setup_work_tree(self, parent):
         frame = ttk.Frame(parent, padding=5)
@@ -601,10 +651,8 @@ class CNCManagerApp:
 
         ttk.Label(filter_frame, text="Filtrer Historique (* autorisée) :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
         self.hist_filter_var = tk.StringVar()
-        # Triggers instant filter update on any change
         self.hist_filter_var.trace_add("write", lambda *args: self.filter_history_data())
         ttk.Entry(filter_frame, textvariable=self.hist_filter_var, width=30).pack(side=tk.LEFT, padx=5)
-        ttk.Label(filter_frame, text="(Nom ouvrier, Date YYYY-MM-DD ou Modèle)").pack(side=tk.LEFT, padx=5)
 
         frame = ttk.Frame(parent, padding=5)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -651,22 +699,25 @@ class CNCManagerApp:
 
                 for row in reader:
                     if row and len(row) >= 2:
-                        cursor.execute('''
-                            INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (
-                            row[0].strip(), row[1].strip(),
-                            row[2].strip() if len(row) > 2 else '',
-                            row[3].strip() if len(row) > 3 else '',
-                            row[4].strip() if len(row) > 4 else '',
-                            row[5].strip() if len(row) > 5 else '',
-                            row[6].strip() if len(row) > 6 else '',
-                            row[7].strip() if len(row) > 7 else '',
-                            row[8].strip() if len(row) > 8 else '',
-                            row[9].strip() if len(row) > 9 else '',
-                            row[10].strip() if len(row) > 10 else ''
-                        ))
-                        count += 1
+                        try:
+                            cursor.execute('''
+                                INSERT INTO models_catalog (model_name, program_name, block_dim, block_dim_bought, qty_per_block, z_between_boards, tools, caisson, plaque_gamma, plaque_beta, remarks)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                row[0].strip(), row[1].strip(),
+                                row[2].strip() if len(row) > 2 else '',
+                                row[3].strip() if len(row) > 3 else '',
+                                row[4].strip() if len(row) > 4 else '',
+                                row[5].strip() if len(row) > 5 else '',
+                                row[6].strip() if len(row) > 6 else '',
+                                row[7].strip() if len(row) > 7 else '',
+                                row[8].strip() if len(row) > 8 else '',
+                                row[9].strip() if len(row) > 9 else '',
+                                row[10].strip() if len(row) > 10 else ''
+                            ))
+                            count += 1
+                        except sqlite3.IntegrityError:
+                            pass
 
             conn.commit()
             conn.close()
@@ -715,22 +766,22 @@ class CNCManagerApp:
         self.filter_history_data()
 
     def filter_data(self):
-        """Filtrage instantané du catalogue avec prise en charge de * wildcard"""
+        """Filtrage instantané du catalogue avec support complet de la chaîne vide et des wildcards *."""
         query = self.search_var.get().strip()
         selected_col_name = self.cmb_search_col.get()
         col_idx = self.search_col_map.get(selected_col_name, 0)
 
         for item in self.tree_cat.get_children():
             vals = self.tree_cat.item(item, "values")
-            cell_value = str(vals[col_idx])
+            cell_value = str(vals[col_idx]) if len(vals) > col_idx else ""
 
-            if match_wildcard(query, cell_value):
+            if not query or match_wildcard(query, cell_value):
                 self.tree_cat.reattach(item, "", tk.END)
             else:
                 self.tree_cat.detach(item)
 
     def filter_history_data(self):
-        """Filtrage instantané de l'historique avec prise en charge de * wildcard"""
+        """Filtrage instantané de l'historique."""
         if self.user['role'] != 'ADMIN':
             return
 
@@ -756,13 +807,6 @@ class CNCManagerApp:
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="🔴 Marquer/Démarquer en Rouge", command=lambda: self.toggle_red_flag(item))
         menu.add_command(label="📝 Ouvrir le fichier programme", command=lambda: self.open_program_notepad(item))
-
-        if self.user['role'] == 'ADMIN':
-            tags = self.tree_cat.item(item, "tags")
-            db_id = int(tags[0])
-            menu.add_separator()
-            menu.add_command(label="✏️ Modifier ce modèle", command=lambda: AddEditModelDialog(self, model_id=db_id))
-
         menu.post(event.x_root, event.y_root)
 
     def toggle_red_flag(self, item):
@@ -865,7 +909,6 @@ class CNCManagerApp:
             messagebox.showwarning("Attention", "Votre liste de travail est vide.")
             return
 
-        # Demande de confirmation avant enregistrement final
         if not messagebox.askyesno("Enregistrement", "Voulez-vous valider et enregistrer cet ordre d'usinage dans l'historique ?"):
             return
 
