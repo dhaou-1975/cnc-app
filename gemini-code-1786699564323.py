@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, font
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v4.3.0"
+APP_VERSION = "v4.3.1"
 DB_FILE = "cnc_factory.db"
 
 
@@ -76,7 +76,6 @@ def init_db():
         )
     ''')
 
-    # Mises à jour de structure si la base existait sous une ancienne version
     cursor.execute("PRAGMA table_info(machining_history)")
     cols = [col[1] for col in cursor.fetchall()]
     if "pain_num" not in cols:
@@ -87,7 +86,6 @@ def init_db():
     if "pain_num" not in cols_work:
         cursor.execute("ALTER TABLE current_worklist ADD COLUMN pain_num TEXT DEFAULT ''")
 
-    # Compte administrateur par défaut
     cursor.execute('''
         INSERT INTO users (username, password, role)
         VALUES ('admin', 'admin', 'ADMIN')
@@ -258,12 +256,12 @@ class EditBlockInfoDialog(tk.Toplevel):
         frame = ttk.Frame(self, padding=15)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="N° / ID Bloc :").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="N° / ID Bloc * :").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.ent_block_num = ttk.Entry(frame, width=25)
         self.ent_block_num.insert(0, item_data.get("block_num", ""))
         self.ent_block_num.grid(row=0, column=1, pady=5)
 
-        ttk.Label(frame, text="N° Pain (Polystyrène) :").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="N° Pain (Polystyrène) * :").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.ent_pain_num = ttk.Entry(frame, width=25)
         self.ent_pain_num.insert(0, item_data.get("pain_num", ""))
         self.ent_pain_num.grid(row=1, column=1, pady=5)
@@ -426,6 +424,7 @@ class CNCManagerApp:
     def _create_menu(self):
         menubar = tk.Menu(self.root)
 
+        # Menu Fichier
         file_menu = tk.Menu(menubar, tearoff=0)
         if self.user['role'] == 'ADMIN':
             file_menu.add_command(label="Importer Fichier CSV...", command=self.import_csv)
@@ -435,11 +434,12 @@ class CNCManagerApp:
         file_menu.add_command(label="Quitter", command=self.on_app_close)
         menubar.add_cascade(label="Fichier", menu=file_menu)
 
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="+ Ajouter un Modèle", command=lambda: AddModelDialog(self.root, self))
-        menubar.add_cascade(label="Outils", menu=tools_menu)
-
+        # Menu Outils : accessible UNIQUEMENT à l'ADMINISTRAEUR
         if self.user['role'] == 'ADMIN':
+            tools_menu = tk.Menu(menubar, tearoff=0)
+            tools_menu.add_command(label="+ Ajouter un Modèle", command=lambda: AddModelDialog(self.root, self))
+            menubar.add_cascade(label="Outils", menu=tools_menu)
+
             admin_menu = tk.Menu(menubar, tearoff=0)
             admin_menu.add_command(label="Gestion Utilisateurs", command=lambda: UserManagementDialog(self.root))
             menubar.add_cascade(label="Administration", menu=admin_menu)
@@ -612,7 +612,7 @@ class CNCManagerApp:
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_work, _c, False))
 
-        # Coloration rouge si données manquantes
+        # Coloration rouge distinctive pour les données manquantes
         self.tree_work.tag_configure('missing_info', background='#D32F2F', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
@@ -672,7 +672,7 @@ class CNCManagerApp:
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def sort_treeview(self, tree, col, reverse):
-        """Trie le tableau au clic sur l'entête de colonne (façon Explorateur Windows)."""
+        """Trie le tableau au clic sur l'entête de colonne."""
         data = [(tree.set(k, col), k) for k in tree.get_children('')]
 
         def convert(val):
@@ -772,7 +772,7 @@ class CNCManagerApp:
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
 
     def check_match(self, query_str, cell_value):
-        """Recherche souple prenant en compte les zéros au début et les sous-chaînes."""
+        """Recherche souple."""
         if not query_str:
             return True
         q = str(query_str).strip().lower()
@@ -934,6 +934,25 @@ class CNCManagerApp:
             messagebox.showwarning("Liste Vide", "Aucun élément à valider dans l'ordre de fabrication.")
             return
 
+        # VÉRIFICATION STRICTE DE LA SAISIE OPÉRATEUR
+        unfilled_items = []
+        for idx, item in enumerate(self.work_list, start=1):
+            b_num = item.get("block_num", "").strip().upper()
+            p_num = item.get("pain_num", "").strip().upper()
+
+            if not b_num or "NON" in b_num or not p_num or "NON" in p_num:
+                unfilled_items.append(f"Ligne P{idx} : Modèle '{item['model']}'")
+
+        if unfilled_items:
+            details = "\n".join(unfilled_items)
+            messagebox.showerror(
+                "Saisie Incomplète",
+                f"Impossible de valider l'usinage !\n\n"
+                f"L'opérateur doit obligatoirement renseigner le N° Bloc et le N° Pain pour :\n\n{details}\n\n"
+                f"Veuillez sélectionner la ligne et cliquer sur 'Renseigner / Editer Bloc & N° Pain'."
+            )
+            return
+
         if not messagebox.askyesno("Validation Usinage", "Confirmer la validation et l'enregistrement de l'usinage courant dans l'historique ?"):
             return
 
@@ -950,10 +969,10 @@ class CNCManagerApp:
                 item["model"],
                 item["program"],
                 item["block_dim"],
-                item.get("block_num", "NON DEFINI"),
-                item.get("pain_num", "NON DEFINI"),
+                item.get("block_num", ""),
+                item.get("pain_num", ""),
                 item.get("block_date", datetime.now().strftime("%Y-%m-%d")),
-                item.get("block_density", "N/A")
+                item.get("block_density", "")
             ))
 
         conn.commit()
@@ -1041,14 +1060,11 @@ class CNCManagerApp:
         self.root.destroy()
 
 
-# ==============================================================================
-# POINT D'ENTRÉE DU PROGRAMME
-# ==============================================================================
 if __name__ == "__main__":
     init_db()
 
     root = tk.Tk()
-    root.withdraw()  # Masque la fenêtre principale tant que le login n'est pas validé
+    root.withdraw()
 
     login_dlg = LoginDialog(root)
     root.wait_window(login_dlg)
