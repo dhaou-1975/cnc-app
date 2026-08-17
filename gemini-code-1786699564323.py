@@ -7,15 +7,15 @@ import threading
 import time
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, font, simpledialog
+from tkinter import ttk, messagebox, filedialog, font
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v4.1.0"
+APP_VERSION = "v4.2.0"
 DB_FILE = "cnc_factory.db"
 
 
 def init_db():
-    """Initialise la base de données et garantit l'existence du compte admin."""
+    """Initialise la base de données SQLite et garantit le compte admin."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -55,11 +55,13 @@ def init_db():
             tools TEXT,
             remarks TEXT,
             block_num TEXT,
+            pain_num TEXT,
             block_date TEXT,
             block_density TEXT
         )
     ''')
 
+    # Migration/Structure pour l'historique de traçabilité
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS machining_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,13 +70,25 @@ def init_db():
             program_name TEXT NOT NULL,
             block_dim TEXT DEFAULT '',
             block_num TEXT NOT NULL,
+            pain_num TEXT DEFAULT '',
             block_date TEXT NOT NULL,
             block_density TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
-    # Garantit la création ou la mise à jour du compte admin/admin
+    # Ajustement dynamique des colonnes de la table historique si absentes
+    cursor.execute("PRAGMA table_info(machining_history)")
+    cols = [col[1] for col in cursor.fetchall()]
+    if "pain_num" not in cols:
+        cursor.execute("ALTER TABLE machining_history ADD COLUMN pain_num TEXT DEFAULT ''")
+
+    cursor.execute("PRAGMA table_info(current_worklist)")
+    cols_work = [col[1] for col in cursor.fetchall()]
+    if "pain_num" not in cols_work:
+        cursor.execute("ALTER TABLE current_worklist ADD COLUMN pain_num TEXT DEFAULT ''")
+
+    # Génère ou met à jour le compte d'administration par défaut (admin / admin)
     cursor.execute('''
         INSERT INTO users (username, password, role)
         VALUES ('admin', 'admin', 'ADMIN')
@@ -86,6 +100,7 @@ def init_db():
 
 
 def autofit_treeview_columns(tree, columns_dict):
+    """Ajuste la largeur des colonnes automatiquement en fonction du contenu."""
     default_font = font.Font()
     for col_id, col_title in columns_dict.items():
         max_len = default_font.measure(col_title) + 25
@@ -146,7 +161,7 @@ class LoginDialog(tk.Toplevel):
             messagebox.showerror("Erreur", "Nom d'utilisateur ou mot de passe incorrect.")
 
     def force_reset_admin(self):
-        if messagebox.askyesno("Réinitialisation", "Voulez-vous forcer la réinitialisation du compte 'admin' avec le mot de passe 'admin' ?"):
+        if messagebox.askyesno("Réinitialisation", "Forcer le compte 'admin' avec le mot de passe 'admin' ?"):
             init_db()
             self.ent_user.delete(0, tk.END)
             self.ent_user.insert(0, "admin")
@@ -228,116 +243,6 @@ class AddModelDialog(tk.Toplevel):
         self.destroy()
 
 
-class DeleteModelDialog(tk.Toplevel):
-    def __init__(self, parent, main_app):
-        super().__init__(parent)
-        self.main_app = main_app
-        self.title("Supprimer des Modèles")
-        self.geometry("850x500")
-        self.grab_set()
-
-        ttk.Label(self, text="Recherche & Suppression de Modèles", font=("Arial", 12, "bold")).pack(pady=5)
-
-        search_frame = ttk.Frame(self, padding=5)
-        search_frame.pack(fill=tk.X)
-
-        ttk.Label(search_frame, text="Rechercher :", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *args: self.filter_delete_list())
-        
-        ent_s = ttk.Entry(search_frame, textvariable=self.search_var, width=30)
-        ent_s.pack(side=tk.LEFT, padx=5)
-
-        ttk.Label(search_frame, text="Dans :").pack(side=tk.LEFT, padx=5)
-        self.cmb_col = ttk.Combobox(search_frame, values=["Nom Modèle", "Programme Pain"], state="readonly", width=18)
-        self.cmb_col.set("Nom Modèle")
-        self.cmb_col.pack(side=tk.LEFT, padx=5)
-        self.cmb_col.bind("<<ComboboxSelected>>", lambda e: self.filter_delete_list())
-
-        tree_frame = ttk.Frame(self, padding=5)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-
-        columns = ("id", "model", "program", "dim_block", "tools")
-        self.tree_del = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
-
-        self.tree_del.heading("id", text="ID")
-        self.tree_del.heading("model", text="Nom Modèle")
-        self.tree_del.heading("program", text="Programme")
-        self.tree_del.heading("dim_block", text="Dim. Bloc")
-        self.tree_del.heading("tools", text="Outils")
-
-        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree_del.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.tree_del.xview)
-        self.tree_del.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.tree_del.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
-
-        btn_box = ttk.Frame(self, padding=10)
-        btn_box.pack(fill=tk.X)
-        ttk.Button(btn_box, text="- Supprimer la sélection", command=self.delete_selected).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_box, text="Fermer", command=self.destroy).pack(side=tk.RIGHT)
-
-        self.load_data()
-
-    def load_data(self):
-        for r in self.tree_del.get_children():
-            self.tree_del.delete(r)
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, model_name, program_name, block_dim, tools FROM models_catalog")
-        self.all_rows = cursor.fetchall()
-        conn.close()
-
-        self.filter_delete_list()
-
-    def filter_delete_list(self):
-        query = self.search_var.get().strip()
-        col_idx = 1 if self.cmb_col.get() == "Nom Modèle" else 2
-
-        for item in self.tree_del.get_children():
-            self.tree_del.delete(item)
-
-        pattern = None
-        if query:
-            regex_str = "^" + re.escape(query).replace(r"\*", ".*").replace(r"\?", ".") + "$"
-            try:
-                pattern = re.compile(regex_str, re.IGNORECASE)
-            except re.error:
-                pattern = None
-
-        for row in self.all_rows:
-            cell_val = str(row[col_idx]) if row[col_idx] else ""
-            if not query:
-                self.tree_del.insert("", tk.END, values=row)
-            elif pattern:
-                if pattern.search(cell_val):
-                    self.tree_del.insert("", tk.END, values=row)
-            else:
-                if query.lower() in cell_val.lower():
-                    self.tree_del.insert("", tk.END, values=row)
-
-    def delete_selected(self):
-        selected = self.tree_del.selection()
-        if not selected:
-            messagebox.showwarning("Attention", "Veuillez sélectionner au moins un modèle à supprimer.")
-            return
-
-        if messagebox.askyesno("Confirmation", f"Voulez-vous vraiment supprimer ces {len(selected)} modèle(s) ?"):
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            for item in selected:
-                model_id = self.tree_del.item(item, "values")[0]
-                cursor.execute("DELETE FROM models_catalog WHERE id=?", (model_id,))
-            conn.commit()
-            conn.close()
-
-            self.load_data()
-            self.main_app.load_catalog_data()
-
-
 class UserManagementDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -411,7 +316,7 @@ class UserManagementDialog(tk.Toplevel):
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", f"Compte '{u}' enregistré/mis à jour.")
+        messagebox.showinfo("Succès", f"Compte '{u}' enregistré.")
         self.load_users()
         self.ent_u.delete(0, tk.END)
         self.ent_p.delete(0, tk.END)
@@ -446,10 +351,13 @@ class CNCManagerApp:
         self.root = root
         self.user = current_user
         self.root.title(f"{APP_NAME} - Connecté : {self.user['username']} [{self.user['role']}]")
-        self.root.geometry("1280x780")
+        self.root.geometry("1300x800")
 
         self.work_list = []
         self.current_tab_key = "catalog"
+
+        # Dictionnaire pour le suivi du sens de tri des colonnes (Tri comme l'explorateur Windows)
+        self.sort_state = {}
 
         style = ttk.Style()
         style.configure("Treeview", rowheight=28)
@@ -482,7 +390,6 @@ class CNCManagerApp:
 
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label="+ Ajouter un Modèle", command=lambda: AddModelDialog(self.root, self))
-        tools_menu.add_command(label="- Supprimer un Modèle", command=lambda: DeleteModelDialog(self.root, self))
         menubar.add_cascade(label="Outils", menu=tools_menu)
 
         if self.user['role'] == 'ADMIN':
@@ -516,7 +423,7 @@ class CNCManagerApp:
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self.filter_data())
-        
+
         self.ent_search = ttk.Entry(toolbar, textvariable=self.search_var, width=25)
         self.ent_search.pack(side=tk.LEFT, padx=5)
 
@@ -539,10 +446,11 @@ class CNCManagerApp:
                 "Programme Pain": 2,
                 "Dimension Bloc": 3,
                 "N° / ID Bloc": 4,
-                "N° Outils": 5,
-                "Remarques": 6,
-                "Date Réception": 7,
-                "Densité (kg/m³)": 8
+                "N° Pain (Noyau Polystyrène)": 5,
+                "N° Outils": 6,
+                "Remarques": 7,
+                "Date Réception": 8,
+                "Densité (kg/m³)": 9
             },
             "history": {
                 "Opérateur": 1,
@@ -550,11 +458,12 @@ class CNCManagerApp:
                 "Programme": 3,
                 "Dim. Bloc": 4,
                 "N° Bloc": 5,
-                "Date Bloc": 6
+                "N° Pain": 6,
+                "Date Bloc": 7
             }
         }
 
-        self.cmb_search_col = ttk.Combobox(toolbar, state="readonly", width=18)
+        self.cmb_search_col = ttk.Combobox(toolbar, state="readonly", width=22)
         self.cmb_search_col.pack(side=tk.LEFT, padx=5)
         self.cmb_search_col.bind("<<ComboboxSelected>>", lambda e: self.filter_data())
 
@@ -615,9 +524,10 @@ class CNCManagerApp:
         self.tree_cat = ttk.Treeview(container, columns=tuple(self.cat_cols.keys()), show="headings", selectmode="extended")
 
         for col, text in self.cat_cols.items():
-            self.tree_cat.heading(col, text=text)
+            self.tree_cat.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_cat, _c, False))
 
-        self.tree_cat.tag_configure('already_selected', background='#E0E0E0', foreground='#666666')
+        # Style Gris permanent pour les modèles déjà sélectionnés dans la liste
+        self.tree_cat.tag_configure('already_selected', background='#D0D0D0', foreground='#333333')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_cat.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
@@ -643,6 +553,7 @@ class CNCManagerApp:
             "program": "Programme Pain",
             "block_dim": "Dimension Bloc",
             "block_num": "N° / ID Bloc",
+            "pain_num": "N° Pain (Polystyrène)",
             "tools": "N° Outils",
             "remarks": "Remarques",
             "block_date": "Date Réception",
@@ -652,9 +563,10 @@ class CNCManagerApp:
         self.tree_work = ttk.Treeview(container, columns=tuple(self.work_cols.keys()), show="headings", selectmode="browse")
 
         for col, text in self.work_cols.items():
-            self.tree_work.heading(col, text=text)
+            self.tree_work.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_work, _c, False))
 
-        self.tree_work.tag_configure('missing_info', background='#FF4D4D', foreground='white')
+        # Tag Rouge pour informations manquantes
+        self.tree_work.tag_configure('missing_info', background='#E53935', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_work.xview)
@@ -672,7 +584,7 @@ class CNCManagerApp:
         ttk.Button(prio_frame, text="▲ Monter", command=self.move_work_item_up).pack(side=tk.LEFT, padx=2)
         ttk.Button(prio_frame, text="▼ Descendre", command=self.move_work_item_down).pack(side=tk.LEFT, padx=2)
 
-        ttk.Button(btn_bar, text="Renseigner / Editer Bloc Matière", command=self.edit_block_info).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_bar, text="Renseigner / Editer Bloc & N° Pain", command=self.edit_block_info).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_bar, text="- Retirer de la liste", command=self.remove_from_worklist).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_bar, text="Valider & Enregistrer Usinage du Jour", command=self.validate_worklist).pack(side=tk.RIGHT, padx=5)
 
@@ -687,15 +599,19 @@ class CNCManagerApp:
             "program": "Programme",
             "dim_block": "Dim. Bloc",
             "block": "N° Bloc",
-            "date": "Date Bloc",
+            "pain": "N° Pain (Polystyrène)",
+            "date": "Date Réception",
             "density": "Densité",
-            "timestamp": "Validation"
+            "timestamp": "Horodatage Validation"
         }
 
         self.tree_hist = ttk.Treeview(container, columns=tuple(self.hist_cols.keys()), show="headings")
 
         for col, text in self.hist_cols.items():
-            self.tree_hist.heading(col, text=text)
+            self.tree_hist.heading(col, text=text, command=lambda _c=col: self.sort_treeview(self.tree_hist, _c, False))
+
+        # Fond ROUGE pour les cases/lignes manquantes dans l'Historique
+        self.tree_hist.tag_configure('missing_info', background='#E53935', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_hist.yview)
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_hist.xview)
@@ -708,6 +624,25 @@ class CNCManagerApp:
     def _create_statusbar(self):
         self.statusbar = ttk.Label(self.root, text=" Prêt.", relief=tk.SUNKEN, anchor=tk.W)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def sort_treeview(self, tree, col, reverse):
+        """Trie le tableau au clic sur l'entête de colonne (façon Explorateur Windows)."""
+        data = [(tree.set(k, col), k) for k in tree.get_children('')]
+
+        # Essaie le tri numérique sinon trie par texte
+        def convert(val):
+            try:
+                return float(val[0].replace('P', ''))
+            except ValueError:
+                return val[0].lower()
+
+        data.sort(key=convert, reverse=reverse)
+
+        for index, (val, k) in enumerate(data):
+            tree.move(k, '', index)
+
+        # Bascule le sens de tri pour le prochain clic
+        tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
 
     def import_csv(self):
         file_path = filedialog.askopenfilename(filetypes=[("Fichiers CSV", "*.csv"), ("Tous les fichiers", "*.*")])
@@ -785,7 +720,7 @@ class CNCManagerApp:
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, operator_username, model_name, program_name, block_dim, block_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
+        cursor.execute("SELECT id, operator_username, model_name, program_name, block_dim, block_num, pain_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
         self.history_rows = cursor.fetchall()
         conn.close()
 
@@ -808,7 +743,7 @@ class CNCManagerApp:
             tree = self.tree_cat
             col_map = self.search_maps["catalog"]
             col_idx = col_map.get(selected_col_name, 0)
-            
+
             for item in tree.get_children():
                 tree.delete(item)
 
@@ -820,16 +755,11 @@ class CNCManagerApp:
                     display_values = r[1:]
                     cell_val = str(display_values[col_idx]) if len(display_values) > col_idx and display_values[col_idx] else ""
 
-                    is_match = False
-                    if not query:
-                        is_match = True
-                    elif pattern:
-                        is_match = bool(pattern.search(cell_val))
-                    else:
-                        is_match = query.lower() in cell_val.lower()
+                    is_match = not query or (pattern.search(cell_val) if pattern else query.lower() in cell_val.lower())
 
                     if is_match:
                         model_name = display_values[0]
+                        # Applique le style GRIS si le modèle est déjà dans l'ordre de fabrication
                         tags = ('already_selected',) if model_name in selected_models else ()
                         tree.insert("", tk.END, iid=str(db_id), values=display_values, tags=tags)
 
@@ -848,16 +778,15 @@ class CNCManagerApp:
                 for row in self.history_rows:
                     cell_val = str(row[col_idx]) if len(row) > col_idx and row[col_idx] else ""
 
-                    is_match = False
-                    if not query:
-                        is_match = True
-                    elif pattern:
-                        is_match = bool(pattern.search(cell_val))
-                    else:
-                        is_match = query.lower() in cell_val.lower()
+                    is_match = not query or (pattern.search(cell_val) if pattern else query.lower() in cell_val.lower())
 
                     if is_match:
-                        tree.insert("", tk.END, values=row)
+                        # Fond rouge si Bloc ou Pain incomplet/non renseigné
+                        block_val = str(row[5]).upper() if len(row) > 5 else ""
+                        pain_val = str(row[6]).upper() if len(row) > 6 else ""
+                        is_missing = ("NON" in block_val or not block_val) or ("NON" in pain_val or not pain_val)
+                        tags = ('missing_info',) if is_missing else ()
+                        tree.insert("", tk.END, values=row, tags=tags)
 
     def add_selected_to_worklist(self):
         selected = self.tree_cat.selection()
@@ -874,6 +803,7 @@ class CNCManagerApp:
                 "tools": vals[5],
                 "remarks": vals[9],
                 "block_num": "",
+                "pain_num": "",
                 "block_date": "",
                 "block_density": ""
             }
@@ -881,7 +811,7 @@ class CNCManagerApp:
             added_count += 1
 
         self.save_worklist_to_db()
-        self.filter_data()
+        self.load_catalog_data()  # Met à jour immédiatement l'affichage en Gris
         self.refresh_work_tree()
         self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste de fabrication.")
 
@@ -910,6 +840,7 @@ class CNCManagerApp:
                 item["program"],
                 item["block_dim"],
                 item["block_num"] if item["block_num"] else "NON RENSEIGNÉ",
+                item["pain_num"] if item.get("pain_num") else "NON RENSEIGNÉ",
                 item["tools"],
                 item["remarks"],
                 item["block_date"],
@@ -918,16 +849,12 @@ class CNCManagerApp:
 
             cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
 
-            is_match = False
-            if not query:
-                is_match = True
-            elif pattern:
-                is_match = bool(pattern.search(cell_val))
-            else:
-                is_match = query.lower() in cell_val.lower()
+            is_match = not query or (pattern.search(cell_val) if pattern else query.lower() in cell_val.lower())
 
             if is_match:
-                tags = ('missing_info',) if not item["block_num"] else ()
+                # Fond ROUGE si l'une des infos obligatoires est absente
+                is_missing = (not item["block_num"]) or (not item.get("pain_num"))
+                tags = ('missing_info',) if is_missing else ()
                 self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
 
         autofit_treeview_columns(self.tree_work, self.work_cols)
@@ -963,7 +890,7 @@ class CNCManagerApp:
         idx = int(selected[0])
         del self.work_list[idx]
         self.save_worklist_to_db()
-        self.filter_data()
+        self.load_catalog_data()  # Libère le surlignage gris dans le catalogue
         self.refresh_work_tree()
 
     def edit_block_info(self):
@@ -976,8 +903,8 @@ class CNCManagerApp:
         item = self.work_list[idx]
 
         dlg = tk.Toplevel(self.root)
-        dlg.title(f"Saisie Bloc : {item['model']}")
-        dlg.geometry("400x310")
+        dlg.title(f"Saisie Bloc & Pain : {item['model']}")
+        dlg.geometry("420x350")
         dlg.resizable(False, False)
         dlg.grab_set()
 
@@ -996,19 +923,25 @@ class CNCManagerApp:
         ent_num.insert(0, item["block_num"])
         ent_num.grid(row=1, column=1, sticky=tk.EW, pady=5)
 
-        ttk.Label(frame, text="Date Réception :").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="N° Pain (Polystyrène) * :").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ent_pain = ttk.Entry(frame)
+        ent_pain.insert(0, item.get("pain_num", ""))
+        ent_pain.grid(row=2, column=1, sticky=tk.EW, pady=5)
+
+        ttk.Label(frame, text="Date Réception :").grid(row=3, column=0, sticky=tk.W, pady=5)
         ent_date = ttk.Entry(frame)
         ent_date.insert(0, item["block_date"] or datetime.now().strftime("%Y-%m-%d"))
-        ent_date.grid(row=2, column=1, sticky=tk.EW, pady=5)
+        ent_date.grid(row=3, column=1, sticky=tk.EW, pady=5)
 
-        ttk.Label(frame, text="Densité (kg/m³) :").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(frame, text="Densité (kg/m³) :").grid(row=4, column=0, sticky=tk.W, pady=5)
         ent_density = ttk.Entry(frame)
         ent_density.insert(0, item["block_density"])
-        ent_density.grid(row=3, column=1, sticky=tk.EW, pady=5)
+        ent_density.grid(row=4, column=1, sticky=tk.EW, pady=5)
 
         def save_info():
             item["block_dim"] = ent_dim.get().strip()
             item["block_num"] = ent_num.get().strip()
+            item["pain_num"] = ent_pain.get().strip()
             item["block_date"] = ent_date.get().strip()
             item["block_density"] = ent_density.get().strip()
             self.save_worklist_to_db()
@@ -1018,7 +951,7 @@ class CNCManagerApp:
         btn_box = ttk.Frame(dlg, padding=10)
         btn_box.pack(fill=tk.X)
         ttk.Button(btn_box, text="Valider", command=save_info).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_box, text="Plus tard (Sauter)", command=dlg.destroy).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_box, text="Plus tard", command=dlg.destroy).pack(side=tk.RIGHT, padx=5)
 
     def save_worklist_to_db(self):
         try:
@@ -1027,12 +960,12 @@ class CNCManagerApp:
             cursor.execute("DELETE FROM current_worklist")
             for idx, item in enumerate(self.work_list):
                 cursor.execute('''
-                    INSERT INTO current_worklist (prio, model, program, block_dim, tools, remarks, block_num, block_date, block_density)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO current_worklist (prio, model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     idx + 1, item["model"], item["program"], item["block_dim"],
                     item["tools"], item["remarks"], item["block_num"],
-                    item["block_date"], item["block_density"]
+                    item.get("pain_num", ""), item["block_date"], item["block_density"]
                 ))
             conn.commit()
             conn.close()
@@ -1045,7 +978,7 @@ class CNCManagerApp:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT model, program, block_dim, tools, remarks, block_num, block_date, block_density FROM current_worklist ORDER BY prio ASC")
+            cursor.execute("SELECT model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density FROM current_worklist ORDER BY prio ASC")
             rows = cursor.fetchall()
             conn.close()
 
@@ -1058,8 +991,9 @@ class CNCManagerApp:
                     "tools": r[3],
                     "remarks": r[4],
                     "block_num": r[5],
-                    "block_date": r[6],
-                    "block_density": r[7]
+                    "pain_num": r[6],
+                    "block_date": r[7],
+                    "block_density": r[8]
                 })
         except Exception:
             self.work_list = []
@@ -1079,11 +1013,11 @@ class CNCManagerApp:
             messagebox.showwarning("Attention", "Votre liste du jour est vide !")
             return
 
-        missing = [item["model"] for item in self.work_list if not item["block_num"]]
+        missing = [item["model"] for item in self.work_list if not item["block_num"] or not item.get("pain_num")]
 
         msg = f"Voulez-vous valider et enregistrer l'usinage de ces {len(self.work_list)} modèle(s) ?"
         if missing:
-            msg += f"\n\nNote : {len(missing)} modèle(s) n'ont pas encore leur N° de Bloc renseigné (affichés en fond rouge). La validation est autorisée."
+            msg += f"\n\nAttention : {len(missing)} modèle(s) ont des données manquantes (N° Bloc / N° Pain sur fond rouge)."
 
         if not messagebox.askyesno("Confirmation", msg):
             return
@@ -1093,14 +1027,15 @@ class CNCManagerApp:
 
         for item in self.work_list:
             cursor.execute('''
-                INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, block_date, block_density)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, pain_num, block_date, block_density)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 self.user["username"],
                 item["model"],
                 item["program"],
                 item["block_dim"],
                 item["block_num"] if item["block_num"] else "NON RENSEIGNÉ",
+                item.get("pain_num") if item.get("pain_num") else "NON RENSEIGNÉ",
                 item["block_date"],
                 item["block_density"]
             ))
@@ -1108,7 +1043,7 @@ class CNCManagerApp:
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Usinage du jour validé et enregistré dans l'historique !")
+        messagebox.showinfo("Succès", "Usinage du jour validé et archivé dans l'historique de traçabilité !")
         if self.user['role'] == 'ADMIN':
             self.load_history_data()
 
@@ -1116,12 +1051,12 @@ class CNCManagerApp:
         self.is_running = False
         self.save_worklist_to_db()
 
-        missing_count = sum(1 for item in self.work_list if not item["block_num"])
+        missing_count = sum(1 for item in self.work_list if not item["block_num"] or not item.get("pain_num"))
         if missing_count > 0:
             resp = messagebox.askyesno(
                 "Données Incomplètes",
-                f"Attention : Vous avez {missing_count} modèle(s) dans votre liste du jour sans N°/ID Bloc renseigné (en rouge).\n\n"
-                "Vos tâches ont été sauvegardées. Voulez-vous vraiment quitter sans compléter ces informations ?"
+                f"Attention : Vous avez {missing_count} modèle(s) dans votre liste avec des informations non renseignées (sur fond rouge).\n\n"
+                "Voulez-vous vraiment quitter ?"
             )
             if not resp:
                 return
