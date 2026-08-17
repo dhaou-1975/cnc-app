@@ -554,7 +554,6 @@ class CNCManagerApp:
 
         ttk.Label(toolbar, text="Dans :").pack(side=tk.LEFT, padx=(10, 5))
 
-        # Dictionnaires de recherche par onglet
         self.search_maps = {
             "catalog": {
                 "Nom Modèle": 0,
@@ -590,7 +589,6 @@ class CNCManagerApp:
         self.cmb_search_col.bind("<<ComboboxSelected>>", lambda e: self.filter_data())
 
     def _update_search_combobox_for_tab(self, tab_key):
-        """Met à jour les options du menu déroulant 'Dans :' selon l'onglet affiché."""
         self.current_tab_key = tab_key
         options = list(self.search_maps[tab_key].keys())
         self.cmb_search_col['values'] = options
@@ -614,7 +612,6 @@ class CNCManagerApp:
             self.notebook.add(self.tab_history, text="Historique Usinages (Admin)")
             self._setup_history_tree(self.tab_history)
 
-        # Mise à jour des filtres 'Dans :' lors du changement d'onglet
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._update_search_combobox_for_tab("catalog")
 
@@ -656,7 +653,6 @@ class CNCManagerApp:
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_cat.xview)
         self.tree_cat.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        # Structure du tableau et scrollbar collée au bas de la table
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree_cat.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
@@ -691,7 +687,6 @@ class CNCManagerApp:
         hsb = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=self.tree_work.xview)
         self.tree_work.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        # Placement exact de la scrollbar horizontale sous le tableau
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree_work.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
@@ -799,215 +794,243 @@ class CNCManagerApp:
         for r in rows:
             db_id = r[0]
             display_values = r[1:]
-            item_id = self.tree_cat.insert("", tk.END, values=display_values, tags=(str(db_id),))
-            if db_id in self.red_flagged_items:
-                self.tree_cat.item(item_id, tags=(str(db_id), 'red_flag'))
+            tags = ('red_flag',) if db_id in self.red_flagged_items else ()
+            self.tree_cat.insert("", tk.END, iid=str(db_id), values=display_values, tags=tags)
 
         autofit_treeview_columns(self.tree_cat, self.cat_cols)
-
-        if self.user['role'] == 'ADMIN':
+        if hasattr(self, 'tree_hist'):
             self.load_history_data()
 
-        self.filter_data()
-        self.statusbar.config(text=f" {len(rows)} modèle(s) présent(s) dans le catalogue.")
-
     def load_history_data(self):
-        if self.user['role'] != 'ADMIN':
-            return
-
-        for row in self.tree_hist.get_children():
-            self.tree_hist.delete(row)
+        for r in self.tree_hist.get_children():
+            self.tree_hist.delete(r)
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT id, operator_username, model_name, program_name, block_dim, block_num, block_date, block_density, timestamp FROM machining_history ORDER BY id DESC")
-        for r in cursor.fetchall():
-            self.tree_hist.insert("", tk.END, values=r)
+        for row in cursor.fetchall():
+            self.tree_hist.insert("", tk.END, values=row)
         conn.close()
-
         autofit_treeview_columns(self.tree_hist, self.hist_cols)
 
     def filter_data(self):
-        """Filtrage instantané : réaffiche immédiatement tous les modèles quand la zone est vide."""
         query = self.search_var.get().strip()
         selected_col_name = self.cmb_search_col.get()
-        
-        tab_key = getattr(self, "current_tab_key", "catalog")
-        col_map = self.search_maps.get(tab_key, {})
-        col_idx = col_map.get(selected_col_name, 0)
 
-        # Cible le Treeview correspondant à l'onglet actif
-        if tab_key == "catalog":
+        if self.current_tab_key == "catalog":
             tree = self.tree_cat
-        elif tab_key == "work":
+            col_map = self.search_maps["catalog"]
+        elif self.current_tab_key == "work":
             tree = self.tree_work
+            col_map = self.search_maps["work"]
         else:
-            tree = self.tree_hist if self.user['role'] == 'ADMIN' else self.tree_cat
+            tree = self.tree_hist
+            col_map = self.search_maps["history"]
+
+        col_idx = col_map.get(selected_col_name, 0)
 
         for item in tree.get_children():
             vals = tree.item(item, "values")
-            cell_value = str(vals[col_idx]) if len(vals) > col_idx else ""
+            cell_val = str(vals[col_idx]) if len(vals) > col_idx else ""
 
-            if not query or match_wildcard(query, cell_value):
+            if match_wildcard(query, cell_val):
                 tree.reattach(item, "", tk.END)
             else:
                 tree.detach(item)
 
     def show_context_menu(self, event):
-        item = self.tree_cat.identify_row(event.y)
-        if not item:
+        item_id = self.tree_cat.identify_row(event.y)
+        if not item_id:
             return
-        self.tree_cat.selection_set(item)
+
+        if item_id not in self.tree_cat.selection():
+            self.tree_cat.selection_set(item_id)
 
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Marquer / Démarquer en Rouge", command=lambda: self.toggle_red_flag(item))
-        menu.add_command(label="Ouvrir le fichier programme", command=lambda: self.open_program_notepad(item))
-        menu.post(event.x_root, event.y_root)
-
-    def toggle_red_flag(self, item):
-        tags = self.tree_cat.item(item, "tags")
-        db_id = int(tags[0])
+        db_id = int(item_id)
 
         if db_id in self.red_flagged_items:
-            self.red_flagged_items.remove(db_id)
-            self.tree_cat.item(item, tags=(str(db_id),))
+            menu.add_command(label="Retirer Marqueur Rouge", command=lambda: self.toggle_red_flag(db_id, False))
         else:
-            self.red_flagged_items.add(db_id)
-            self.tree_cat.item(item, tags=(str(db_id), 'red_flag'))
+            menu.add_command(label="Marquer en Rouge (Alerte)", command=lambda: self.toggle_red_flag(db_id, True))
 
-    def open_program_notepad(self, item):
-        vals = self.tree_cat.item(item, "values")
-        prog_name = vals[1]
-        if sys.platform == "win32":
-            try:
-                subprocess.Popen(["notepad.exe", f"{prog_name}.txt"])
-            except Exception:
-                messagebox.showinfo("Programme", f"Programme sélectionné : {prog_name}")
+        menu.add_separator()
+        menu.add_command(label="+ Ajouter à ma Liste du Jour", command=self.add_selected_to_worklist)
+        menu.post(event.x_root, event.y_root)
+
+    def toggle_red_flag(self, db_id, add_flag):
+        if add_flag:
+            self.red_flagged_items.add(db_id)
+            self.tree_cat.item(str(db_id), tags=('red_flag',))
         else:
-            messagebox.showinfo("Programme", f"Programme sélectionné : {prog_name}")
+            self.red_flagged_items.discard(db_id)
+            self.tree_cat.item(str(db_id), tags=())
 
     def add_selected_to_worklist(self):
         selected = self.tree_cat.selection()
         if not selected:
-            messagebox.showwarning("Attention", "Veuillez sélectionner au moins un modèle.")
             return
 
-        for s in selected:
-            vals = self.tree_cat.item(s, "values")
-            item_data = {
+        added_count = 0
+        for item_id in selected:
+            vals = self.tree_cat.item(item_id, "values")
+            work_item = {
                 "model": vals[0],
                 "program": vals[1],
                 "block_dim": vals[2],
-                "tools": vals[5] if len(vals) > 5 else "",
-                "remarks": vals[9] if len(vals) > 9 else "",
-                "block_date": datetime.today().strftime('%Y-%m-%d'),
-                "block_density": "28"
+                "tools": vals[5],
+                "remarks": vals[9],
+                "block_num": "",
+                "block_date": "",
+                "block_density": ""
             }
-            self.work_list.append(item_data)
+            self.work_list.append(work_item)
+            added_count += 1
 
         self.refresh_work_tree()
-        self.notebook.select(self.tab_work)
+        self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste du jour.")
+        messagebox.showinfo("Ordre de Fabrication", f"{added_count} modèle(s) ajouté(s) à votre liste du jour.")
 
     def refresh_work_tree(self):
-        for row in self.tree_work.get_children():
-            self.tree_work.delete(row)
-        for item in self.work_list:
-            self.tree_work.insert("", tk.END, values=(
-                item["model"], item["program"], item["block_dim"], item["tools"], item["remarks"], item["block_date"], item["block_density"]
-            ))
+        for r in self.tree_work.get_children():
+            self.tree_work.delete(r)
+
+        for idx, item in enumerate(self.work_list):
+            vals = (
+                item["model"],
+                item["program"],
+                item["block_dim"],
+                item["tools"],
+                item["remarks"],
+                item["block_date"],
+                item["block_density"]
+            )
+            self.tree_work.insert("", tk.END, iid=str(idx), values=vals)
+
         autofit_treeview_columns(self.tree_work, self.work_cols)
+
+    def remove_from_worklist(self):
+        selected = self.tree_work.selection()
+        if not selected:
+            messagebox.showwarning("Attention", "Sélectionnez une ligne à retirer.")
+            return
+
+        idx = int(selected[0])
+        del self.work_list[idx]
+        self.refresh_work_tree()
 
     def edit_block_info(self):
         selected = self.tree_work.selection()
         if not selected:
-            messagebox.showwarning("Attention", "Sélectionnez un modèle dans votre liste de travail.")
+            messagebox.showwarning("Attention", "Veuillez sélectionner un modèle dans votre liste du jour.")
             return
 
-        idx = self.tree_work.index(selected[0])
+        idx = int(selected[0])
         item = self.work_list[idx]
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("Fiche Bloc Matière")
-        dlg.geometry("350x250")
+        dlg.title(f"Saisie Bloc : {item['model']}")
+        dlg.geometry("380x280")
+        dlg.resizable(False, False)
+        dlg.grab_set()
 
-        ttk.Label(dlg, text="N° Outils :").pack(pady=2)
-        ent_tools = ttk.Entry(dlg)
-        ent_tools.insert(0, item["tools"])
-        ent_tools.pack(pady=2)
+        ttk.Label(dlg, text=f"Informations Bloc pour {item['model']}", font=("Arial", 10, "bold")).pack(pady=10)
 
-        ttk.Label(dlg, text="Date Réception Bloc :").pack(pady=2)
-        ent_date = ttk.Entry(dlg)
-        ent_date.insert(0, item["block_date"])
-        ent_date.pack(pady=2)
+        frame = ttk.Frame(dlg, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(dlg, text="Densité du Bloc (kg/m³) :").pack(pady=2)
-        ent_dens = ttk.Entry(dlg)
-        ent_dens.insert(0, item["block_density"])
-        ent_dens.pack(pady=2)
+        ttk.Label(frame, text="Dimension Bloc :").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ent_dim = ttk.Entry(frame)
+        ent_dim.insert(0, item["block_dim"])
+        ent_dim.grid(row=0, column=1, sticky=tk.EW, pady=5)
 
-        def save():
-            item["tools"] = ent_tools.get()
-            item["block_date"] = ent_date.get()
-            item["block_density"] = ent_dens.get()
+        ttk.Label(frame, text="N° / Id Bloc * :").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ent_num = ttk.Entry(frame)
+        ent_num.insert(0, item["block_num"])
+        ent_num.grid(row=1, column=1, sticky=tk.EW, pady=5)
+
+        ttk.Label(frame, text="Date Réception :").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ent_date = ttk.Entry(frame)
+        ent_date.insert(0, item["block_date"] or datetime.now().strftime("%Y-%m-%d"))
+        ent_date.grid(row=2, column=1, sticky=tk.EW, pady=5)
+
+        ttk.Label(frame, text="Densité (kg/m³) :").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ent_density = ttk.Entry(frame)
+        ent_density.insert(0, item["block_density"])
+        ent_density.grid(row=3, column=1, sticky=tk.EW, pady=5)
+
+        def save_info():
+            item["block_dim"] = ent_dim.get().strip()
+            item["block_num"] = ent_num.get().strip()
+            item["block_date"] = ent_date.get().strip()
+            item["block_density"] = ent_density.get().strip()
             self.refresh_work_tree()
             dlg.destroy()
 
-        ttk.Button(dlg, text="Enregistrer", command=save).pack(pady=10)
-
-    def remove_from_worklist(self):
-        selected = self.tree_work.selection()
-        if selected:
-            idx = self.tree_work.index(selected[0])
-            del self.work_list[idx]
-            self.refresh_work_tree()
+        ttk.Button(dlg, text="Valider", command=save_info).pack(pady=10)
 
     def validate_worklist(self):
         if not self.work_list:
-            messagebox.showwarning("Attention", "Votre liste de travail est vide.")
+            messagebox.showwarning("Attention", "Votre liste du jour est vide !")
             return
 
-        if not messagebox.askyesno("Enregistrement", "Voulez-vous valider et enregistrer cet ordre d'usinage dans l'historique ?"):
+        missing = [item["model"] for item in self.work_list if not item["block_num"]]
+        if missing:
+            messagebox.showerror("Informations Manquantes", f"Veuillez renseigner le 'N° Bloc' pour tous les modèles :\n- " + "\n- ".join(missing))
+            return
+
+        if not messagebox.askyesno("Confirmation", f"Voulez-vous valider et enregistrer l'usinage de ces {len(self.work_list)} modèle(s) ?"):
             return
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
+
         for item in self.work_list:
             cursor.execute('''
                 INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, block_date, block_density)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (self.user['username'], item['model'], item['program'], item['block_dim'], item['tools'], item['block_date'], item['block_density']))
+            ''', (
+                self.user["username"],
+                item["model"],
+                item["program"],
+                item["block_dim"],
+                item["block_num"],
+                item["block_date"],
+                item["block_density"]
+            ))
+
         conn.commit()
         conn.close()
 
-        messagebox.showinfo("Succès", "Ordre d'usinage du jour enregistré avec succès !")
+        messagebox.showinfo("Succès", "Travail du jour validé et enregistré dans l'historique !")
         self.work_list.clear()
         self.refresh_work_tree()
         if self.user['role'] == 'ADMIN':
             self.load_history_data()
 
 
-if __name__ == "__main__":
+def main():
     init_db()
 
     root = tk.Tk()
     root.withdraw()
 
-    user_count = get_user_count()
+    # Création du premier compte Administrateur par défaut si la BDD est vide
+    if get_user_count() == 0:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "admin", "ADMIN"))
+        conn.commit()
+        conn.close()
 
-    if user_count == 0:
-        messagebox.showinfo(
-            "Premier Démarrage", 
-            "Aucun utilisateur enregistré.\nLe logiciel s'ouvre en mode Administrateur.\nUtilisez le menu 'Administration' pour créer vos comptes."
-        )
-        current_user = {"username": "Admin Initial", "role": "ADMIN"}
-    else:
-        login = LoginDialog(root)
-        root.wait_window(login)
-        current_user = login.user_data
+    login_dlg = LoginDialog(root)
+    root.wait_window(login_dlg)
 
-    if current_user:
+    if login_dlg.user_data:
         root.deiconify()
-        app = CNCManagerApp(root, current_user)
+        app = CNCManagerApp(root, login_dlg.user_data)
         root.mainloop()
-    else:
-        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
