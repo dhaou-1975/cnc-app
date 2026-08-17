@@ -7,14 +7,15 @@ import threading
 import time
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, font
+from tkinter import ttk, messagebox, filedialog, font, simpledialog
 
 APP_NAME = "CNC Manager - Ateliers Windsurf"
-APP_VERSION = "v4.0.0"
+APP_VERSION = "v4.1.0"
 DB_FILE = "cnc_factory.db"
 
 
 def init_db():
+    """Initialise la base de données et garantit l'existence du compte admin."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -73,17 +74,15 @@ def init_db():
         )
     ''')
 
+    # Garantit la création ou la mise à jour du compte admin/admin
+    cursor.execute('''
+        INSERT INTO users (username, password, role)
+        VALUES ('admin', 'admin', 'ADMIN')
+        ON CONFLICT(username) DO UPDATE SET password='admin', role='ADMIN'
+    ''')
+
     conn.commit()
     conn.close()
-
-
-def get_user_count():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*)")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
 
 
 def autofit_treeview_columns(tree, columns_dict):
@@ -102,7 +101,7 @@ class LoginDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Authentification")
-        self.geometry("380x230")
+        self.geometry("400x260")
         self.resizable(False, False)
         self.grab_set()
 
@@ -115,6 +114,7 @@ class LoginDialog(tk.Toplevel):
 
         ttk.Label(frame, text="Nom d'utilisateur :").grid(row=0, column=0, sticky=tk.W, pady=5)
         self.ent_user = ttk.Entry(frame)
+        self.ent_user.insert(0, "admin")
         self.ent_user.grid(row=0, column=1, sticky=tk.EW, pady=5)
         self.ent_user.focus()
 
@@ -125,7 +125,7 @@ class LoginDialog(tk.Toplevel):
         btn_box = ttk.Frame(self, padding=10)
         btn_box.pack(fill=tk.X)
         ttk.Button(btn_box, text="Se Connecter", command=self.check_login).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_box, text="Quitter", command=self.master.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btn_box, text="Réinitialiser Admin", command=self.force_reset_admin).pack(side=tk.LEFT, padx=5)
 
         self.bind('<Return>', lambda event: self.check_login())
 
@@ -144,6 +144,15 @@ class LoginDialog(tk.Toplevel):
             self.destroy()
         else:
             messagebox.showerror("Erreur", "Nom d'utilisateur ou mot de passe incorrect.")
+
+    def force_reset_admin(self):
+        if messagebox.askyesno("Réinitialisation", "Voulez-vous forcer la réinitialisation du compte 'admin' avec le mot de passe 'admin' ?"):
+            init_db()
+            self.ent_user.delete(0, tk.END)
+            self.ent_user.insert(0, "admin")
+            self.ent_pass.delete(0, tk.END)
+            self.ent_pass.insert(0, "admin")
+            messagebox.showinfo("Succès", "Le compte 'admin' a été réinitialisé.\n\nNom: admin\nMot de passe: admin")
 
 
 class AddModelDialog(tk.Toplevel):
@@ -370,7 +379,7 @@ class UserManagementDialog(tk.Toplevel):
         self.cmb_r.set("OPERATEUR")
         self.cmb_r.grid(row=0, column=5, padx=2)
 
-        ttk.Button(frame_form, text="+ Ajouter", command=self.add_user).grid(row=0, column=6, padx=5)
+        ttk.Button(frame_form, text="+ Ajouter/Maj", command=self.add_or_update_user).grid(row=0, column=6, padx=5)
 
         self.load_users()
 
@@ -384,7 +393,7 @@ class UserManagementDialog(tk.Toplevel):
             self.tree_users.insert("", tk.END, values=row)
         conn.close()
 
-    def add_user(self):
+    def add_or_update_user(self):
         u = self.ent_u.get().strip()
         p = self.ent_p.get().strip()
         r = self.cmb_r.get()
@@ -395,17 +404,17 @@ class UserManagementDialog(tk.Toplevel):
 
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (u, p, r))
-            conn.commit()
-            messagebox.showinfo("Succès", f"Compte '{u}' créé.")
-            self.load_users()
-            self.ent_u.delete(0, tk.END)
-            self.ent_p.delete(0, tk.END)
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Erreur", "Ce nom d'utilisateur existe déjà.")
-        finally:
-            conn.close()
+        cursor.execute('''
+            INSERT INTO users (username, password, role) VALUES (?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET password=?, role=?
+        ''', (u, p, r, p, r))
+        conn.commit()
+        conn.close()
+
+        messagebox.showinfo("Succès", f"Compte '{u}' enregistré/mis à jour.")
+        self.load_users()
+        self.ent_u.delete(0, tk.END)
+        self.ent_p.delete(0, tk.END)
 
     def delete_user(self):
         selected = self.tree_users.selection()
@@ -442,7 +451,6 @@ class CNCManagerApp:
         self.work_list = []
         self.current_tab_key = "catalog"
 
-        # Style global pour augmenter la hauteur des lignes
         style = ttk.Style()
         style.configure("Treeview", rowheight=28)
 
@@ -457,7 +465,6 @@ class CNCManagerApp:
         self.load_saved_worklist()
         self.load_catalog_data()
 
-        # Démarrage de la sauvegarde automatique toutes les 5 minutes
         self.is_running = True
         self.start_auto_save_thread()
 
@@ -610,7 +617,6 @@ class CNCManagerApp:
         for col, text in self.cat_cols.items():
             self.tree_cat.heading(col, text=text)
 
-        # Tag pour signaler un élément déjà ajouté dans la liste de travail
         self.tree_cat.tag_configure('already_selected', background='#E0E0E0', foreground='#666666')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_cat.yview)
@@ -648,7 +654,6 @@ class CNCManagerApp:
         for col, text in self.work_cols.items():
             self.tree_work.heading(col, text=text)
 
-        # Fond Rouge strict pour les informations manquantes (N° Bloc non renseigné)
         self.tree_work.tag_configure('missing_info', background='#FF4D4D', foreground='white')
 
         vsb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.tree_work.yview)
@@ -922,7 +927,6 @@ class CNCManagerApp:
                 is_match = query.lower() in cell_val.lower()
 
             if is_match:
-                # Si le bloc n'est pas renseigné -> Tag ROUGE
                 tags = ('missing_info',) if not item["block_num"] else ()
                 self.tree_work.insert("", tk.END, iid=str(idx), values=vals, tags=tags)
 
@@ -1017,7 +1021,6 @@ class CNCManagerApp:
         ttk.Button(btn_box, text="Plus tard (Sauter)", command=dlg.destroy).pack(side=tk.RIGHT, padx=5)
 
     def save_worklist_to_db(self):
-        """Enregistre la liste de travail courante dans SQLite pour éviter toute perte."""
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -1039,7 +1042,6 @@ class CNCManagerApp:
             self.statusbar.config(text=f" Erreur lors de la sauvegarde : {e}")
 
     def load_saved_worklist(self):
-        """Restaure la liste de travail enregistrée lors de la précédente session."""
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -1063,7 +1065,6 @@ class CNCManagerApp:
             self.work_list = []
 
     def start_auto_save_thread(self):
-        """Démarre une sauvegarde automatique toutes les 5 minutes (300 secondes)."""
         def auto_save_loop():
             while self.is_running:
                 time.sleep(300)
@@ -1132,13 +1133,6 @@ def main():
 
     root = tk.Tk()
     root.withdraw()
-
-    if get_user_count() == 0:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "admin", "ADMIN"))
-        conn.commit()
-        conn.close()
 
     login_dlg = LoginDialog(root)
     root.wait_window(login_dlg)
