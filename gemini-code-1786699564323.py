@@ -7,13 +7,14 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-# Importation du module série pour le transfert vers la CNC
+# Importation sécurisée de PySerial pour éviter les crashs au lancement sous Windows 7
 try:
     import serial
     import serial.tools.list_ports
     HAS_SERIAL = True
-except ImportError:
+except Exception as e:
     HAS_SERIAL = False
+    SERIAL_ERROR_MSG = str(e)
 
 # --- CONFIGURATION INITIALE & BASE DE DONNÉES ---
 DB_FILE = "cnc_manager.db"
@@ -203,12 +204,16 @@ class CNCTransferDialog(tk.Toplevel):
         self.program_name = program_name
 
         if not HAS_SERIAL:
-            messagebox.showerror("Module Manquant", "Le module 'pyserial' n'est pas installé. Veuillez exécuter 'pip install pyserial'.")
+            messagebox.showerror("Module RS-232 Indisponible", f"Impossible d'initialiser le port série sur ce système.\nErreur : {SERIAL_ERROR_MSG}")
             self.destroy()
             return
 
         # Détection des ports
-        available_ports = [p.device for p in serial.tools.list_ports.comports()]
+        try:
+            available_ports = [p.device for p in serial.tools.list_ports.comports()]
+        except Exception:
+            available_ports = []
+            
         if not available_ports:
             available_ports = ["COM1", "COM2", "COM3", "COM4"]
 
@@ -244,7 +249,7 @@ class CNCTransferDialog(tk.Toplevel):
         self.ent_filepath = tk.Entry(frame_file, width=32)
         self.ent_filepath.insert(0, f"programs/{self.program_name}.nc")
         self.ent_filepath.pack(side=tk.LEFT, padx=5)
-        tk.Button(frame_file, text="Browse", command=self.browse_file).pack(side=tk.LEFT)
+        tk.Button(frame_file, text="Parcourir", command=self.browse_file).pack(side=tk.LEFT)
 
         # Barre de progression
         self.progress = ttk.Progressbar(self, orient="horizontal", length=410, mode="determinate")
@@ -300,7 +305,7 @@ class CNCTransferDialog(tk.Toplevel):
                 total_lines = len(lines)
                 for idx, line in enumerate(lines):
                     ser.write(line.encode('ascii', errors='replace'))
-                    time.sleep(0.01)  # Intervalle d'envoi de bloc
+                    time.sleep(0.01)
                     
                     progress_val = ((idx + 1) / total_lines) * 100
                     self.progress['value'] = progress_val
