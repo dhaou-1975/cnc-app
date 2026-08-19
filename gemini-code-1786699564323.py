@@ -3,9 +3,14 @@ import sys
 import sqlite3
 import threading
 import time
+import multiprocessing
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+# Indispensable pour PyInstaller sous Windows (évite les processus fantômes en arrière-plan)
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
 
 # --- IMPORTATION SÉCURISÉE RS-232 / PYSERIAL ---
 HAS_SERIAL = False
@@ -623,7 +628,7 @@ class CNCManagerApp:
         except Exception: pass
         self.root.destroy()
 
-if __name__ == "__main__":
+def main():
     init_db()
 
     root = tk.Tk()
@@ -640,3 +645,6 @@ if __name__ == "__main__":
     else:
         root.destroy()
         sys.exit(0)
+
+if __name__ == "__main__":
+    main()
