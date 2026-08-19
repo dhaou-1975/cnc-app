@@ -11,10 +11,10 @@ jobs:
 
     steps:
     - name: Checkout du code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Configuration de Python 3.8 (Compatible Windows 7)
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.8.10'
         architecture: 'x64'
@@ -29,7 +29,7 @@ jobs:
         pyinstaller --noconsole --onefile --clean gemini-code-1786699564323.py
 
     - name: Publication de l'exécutable
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: CNC-Manager-Win7
         path: dist/gemini-code-1786699564323.exe
