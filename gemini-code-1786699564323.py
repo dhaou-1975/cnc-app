@@ -7,24 +7,24 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-# Importation sécurisée de PySerial pour éviter les crashs au lancement sous Windows 7
+# --- IMPORTATION SÉCURISÉE RS-232 / PYSERIAL ---
+HAS_SERIAL = False
+SERIAL_ERROR_MSG = ""
 try:
     import serial
     import serial.tools.list_ports
     HAS_SERIAL = True
-except Exception as e:
+except Exception as err:
     HAS_SERIAL = False
-    SERIAL_ERROR_MSG = str(e)
+    SERIAL_ERROR_MSG = str(err)
 
-# --- CONFIGURATION INITIALE & BASE DE DONNÉES ---
+# --- BASE DE DONNÉES ---
 DB_FILE = "cnc_manager.db"
-
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # Table Utilisateurs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,19 +34,11 @@ def init_db():
         )
     ''')
 
-    # Comptes par défaut si la table est vide
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
-        cursor.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("admin", "admin123", "ADMIN")
-        )
-        cursor.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("operateur", "1234", "OPERATOR")
-        )
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "admin123", "ADMIN"))
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ("operateur", "1234", "OPERATOR"))
 
-    # Table Catalogue (Modèles Windsurf)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS catalog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +54,6 @@ def init_db():
         )
     ''')
 
-    # Table Ordre de Fabrication (Liste de travail en cours)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS current_worklist (
             prio INTEGER PRIMARY KEY,
@@ -78,7 +69,6 @@ def init_db():
         )
     ''')
 
-    # Table Historique d'Usinage
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS machining_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,8 +87,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
-# --- FONCTIONS UTILITAIRES ---
 def autofit_treeview_columns(tree, columns):
     for col in columns:
         max_len = len(col)
@@ -108,8 +96,7 @@ def autofit_treeview_columns(tree, columns):
                 max_len = len(val)
         tree.column(col, width=max(max_len * 9, 80))
 
-
-# --- FENÊTRE DE CONNEXION ---
+# --- DIALOGUES ---
 class LoginDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -126,8 +113,8 @@ class LoginDialog(tk.Toplevel):
         self.ent_pass = tk.Entry(self, show="*")
         self.ent_pass.pack()
 
-        tk.Button(self, text="Se Connecter", command=self.check_login, width=15).pack(pady=15)
-        self.bind('<Return>', lambda event: self.check_login())
+        tk.Button(self, text="Se Connecter", command=self.check_login, width=15, bg="#4CAF50", fg="white").pack(pady=15)
+        self.bind('<Return>', lambda e: self.check_login())
         
         self.transient(parent)
         self.grab_set()
@@ -148,12 +135,10 @@ class LoginDialog(tk.Toplevel):
         else:
             messagebox.showerror("Erreur", "Identifiants incorrects.")
 
-
-# --- DIALOGUE ÉDITION BLOC/PAIN ---
 class EditBlockInfoDialog(tk.Toplevel):
     def __init__(self, parent, item_data, on_save_callback):
         super().__init__(parent)
-        self.title(f"Informations Blocs - Modèle : {item_data.get('model', '')}")
+        self.title(f"Bloc/Pain - {item_data.get('model', '')}")
         self.geometry("350x250")
         self.resizable(False, False)
         self.item_data = item_data
@@ -179,8 +164,8 @@ class EditBlockInfoDialog(tk.Toplevel):
         self.ent_density.insert(0, item_data.get("block_density", ""))
         self.ent_density.grid(row=3, column=1, padx=10, pady=10)
 
-        tk.Button(self, text="Valider", command=self.save, width=12).grid(row=4, column=0, columnspan=2, pady=15)
-        
+        tk.Button(self, text="Enregistrer", command=self.save, width=12, bg="#2196F3", fg="white").grid(row=4, column=0, columnspan=2, pady=15)
+
         self.transient(parent)
         self.grab_set()
 
@@ -193,32 +178,28 @@ class EditBlockInfoDialog(tk.Toplevel):
             self.on_save_callback()
         self.destroy()
 
-
-# --- DIALOGUE TRANSFERT PROGRAMME (RS-232 / PORT SÉRIE) ---
 class CNCTransferDialog(tk.Toplevel):
     def __init__(self, parent, program_name):
         super().__init__(parent)
-        self.title(f"Transfert RS-232 CNC - Programme : {program_name}")
+        self.title(f"Transfert RS-232 - Programme : {program_name}")
         self.geometry("450x380")
         self.resizable(False, False)
         self.program_name = program_name
 
         if not HAS_SERIAL:
-            messagebox.showerror("Module RS-232 Indisponible", f"Impossible d'initialiser le port série sur ce système.\nErreur : {SERIAL_ERROR_MSG}")
+            messagebox.showerror("Module RS-232 Indisponible", f"Impossible d'initialiser le port série.\nDétail : {SERIAL_ERROR_MSG}")
             self.destroy()
             return
 
-        # Détection des ports
         try:
             available_ports = [p.device for p in serial.tools.list_ports.comports()]
         except Exception:
             available_ports = []
-            
+
         if not available_ports:
             available_ports = ["COM1", "COM2", "COM3", "COM4"]
 
-        # Configuration des champs de connexion
-        frame_cfg = tk.LabelFrame(self, text=" Paramètres de Communication Série ", padx=10, pady=10)
+        frame_cfg = tk.LabelFrame(self, text=" Paramètres RS-232 CNC ", padx=10, pady=10)
         frame_cfg.pack(fill=tk.X, padx=10, pady=10)
 
         tk.Label(frame_cfg, text="Port COM :").grid(row=0, column=0, sticky="e", pady=5)
@@ -231,7 +212,7 @@ class CNCTransferDialog(tk.Toplevel):
         self.cb_baud.set("9600")
         self.cb_baud.grid(row=1, column=1, pady=5, padx=5)
 
-        tk.Label(frame_cfg, text="Bits de données :").grid(row=2, column=0, sticky="e", pady=5)
+        tk.Label(frame_cfg, text="Bits données :").grid(row=2, column=0, sticky="e", pady=5)
         self.cb_databits = ttk.Combobox(frame_cfg, values=["7", "8"], width=12)
         self.cb_databits.set("7")
         self.cb_databits.grid(row=2, column=1, pady=5, padx=5)
@@ -241,22 +222,19 @@ class CNCTransferDialog(tk.Toplevel):
         self.cb_parity.set("EVEN")
         self.cb_parity.grid(row=3, column=1, pady=5, padx=5)
 
-        # Fichier à transférer
         frame_file = tk.Frame(self)
         frame_file.pack(fill=tk.X, padx=10, pady=5)
-        
+
         tk.Label(frame_file, text="Fichier :").pack(side=tk.LEFT)
         self.ent_filepath = tk.Entry(frame_file, width=32)
         self.ent_filepath.insert(0, f"programs/{self.program_name}.nc")
         self.ent_filepath.pack(side=tk.LEFT, padx=5)
         tk.Button(frame_file, text="Parcourir", command=self.browse_file).pack(side=tk.LEFT)
 
-        # Barre de progression
         self.progress = ttk.Progressbar(self, orient="horizontal", length=410, mode="determinate")
         self.progress.pack(pady=15)
 
-        # Bouton d'envoi
-        self.btn_send = tk.Button(self, text=" Transmettre le Programme vers CNC ", command=self.start_transfer, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
+        self.btn_send = tk.Button(self, text=" Envoyer vers la CNC ", command=self.start_transfer, bg="#9C27B0", fg="white", font=("Arial", 10, "bold"))
         self.btn_send.pack(pady=5)
 
         self.transient(parent)
@@ -271,62 +249,50 @@ class CNCTransferDialog(tk.Toplevel):
     def start_transfer(self):
         filepath = self.ent_filepath.get().strip()
         if not os.path.exists(filepath):
-            messagebox.showerror("Fichier Introuvable", f"Impossible de trouver le fichier G-code :\n{filepath}")
+            messagebox.showerror("Erreur Fichier", f"Fichier introuvable :\n{filepath}")
             return
 
         port = self.cb_port.get()
         baud = int(self.cb_baud.get())
         databits = serial.SEVENBITS if self.cb_databits.get() == "7" else serial.EIGHTBITS
-        
-        parity_val = self.cb_parity.get()
-        if parity_val == "EVEN":
-            parity = serial.PARITY_EVEN
-        elif parity_val == "ODD":
-            parity = serial.PARITY_ODD
-        else:
-            parity = serial.PARITY_NONE
+
+        p_str = self.cb_parity.get()
+        parity = serial.PARITY_EVEN if p_str == "EVEN" else (serial.PARITY_ODD if p_str == "ODD" else serial.PARITY_NONE)
 
         self.btn_send.config(state=tk.DISABLED)
 
         def transfer_worker():
             try:
-                with open(filepath, 'r', encoding='utf-8', errors='ignore') as file:
-                    lines = file.readlines()
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
 
                 ser = serial.Serial(
-                    port=port,
-                    baudrate=baud,
-                    bytesize=databits,
-                    parity=parity,
-                    stopbits=serial.STOPBITS_TWO,
-                    timeout=2
+                    port=port, baudrate=baud, bytesize=databits,
+                    parity=parity, stopbits=serial.STOPBITS_TWO, timeout=2
                 )
 
-                total_lines = len(lines)
+                total = len(lines)
                 for idx, line in enumerate(lines):
                     ser.write(line.encode('ascii', errors='replace'))
                     time.sleep(0.01)
-                    
-                    progress_val = ((idx + 1) / total_lines) * 100
-                    self.progress['value'] = progress_val
+                    self.progress['value'] = ((idx + 1) / total) * 100
                     self.update_idletasks()
 
                 ser.close()
-                messagebox.showinfo("Succès", "Le transfert RS-232 vers la commande numérique s'est terminé avec succès.")
+                messagebox.showinfo("Succès", "Transfert RS-232 terminé avec succès !")
             except Exception as e:
-                messagebox.showerror("Erreur RS-232", f"Une erreur s'est produite durant le transfert :\n{str(e)}")
+                messagebox.showerror("Erreur Transfert", f"Échec du transfert RS-232 :\n{str(e)}")
             finally:
                 self.btn_send.config(state=tk.NORMAL)
 
         threading.Thread(target=transfer_worker, daemon=True).start()
-
 
 # --- APPLICATION PRINCIPALE ---
 class CNCManagerApp:
     def __init__(self, root, user_data):
         self.root = root
         self.user = user_data
-        self.root.title(f"CNC Manager - Ateliers Windsurf [{self.user['username']} - {self.user['role']}]")
+        self.root.title(f"CNC Manager - [{self.user['username']} / {self.user['role']}]")
         self.root.geometry("1150x680")
         self.is_running = True
 
@@ -334,11 +300,9 @@ class CNCManagerApp:
         self.catalog_rows = []
         self.history_rows = []
 
-        # Configuration des styles
         style = ttk.Style()
         style.theme_use("clam")
 
-        # Barre de recherche & Filtres
         top_frame = tk.Frame(self.root, bd=1, relief=tk.RAISED)
         top_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
 
@@ -350,34 +314,28 @@ class CNCManagerApp:
         self.ent_search.pack(side=tk.LEFT, padx=5)
         self.ent_search.bind("<KeyRelease>", lambda e: self.filter_data())
 
-        # Bloc Onglets
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
-        # Onglet Catalogue
         self.tab_cat = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_cat, text=" Catalogue Modèles ")
         self.setup_catalog_tab()
 
-        # Onglet Liste d'Usinage (Ordre de Fabrication)
         self.tab_work = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_work, text=" Ordre d'Usinage ")
         self.setup_work_tab()
 
-        # Onglet Historique (Admin uniquement)
         if self.user['role'] == 'ADMIN':
             self.tab_hist = ttk.Frame(self.notebook)
             self.notebook.add(self.tab_hist, text=" Historique Production ")
             self.setup_history_tab()
 
-        # Barre de statut
-        self.statusbar = tk.Label(self.root, text=" Prêt", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.statusbar = tk.Label(self.root, text=" Application prête", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # Correspondance des recherches
         self.search_maps = {
-            "cat": {"Modèle": 0, "Programme": 1, "Projet": 2, "Outils": 5},
+            "cat": {"Modèle": 0, "Programme": 1, "Outils": 5},
             "work": {"Modèle": 1, "Programme": 2, "N° Bloc": 4, "N° Pain": 5},
             "history": {"Opérateur": 1, "Modèle": 2, "Programme": 3, "N° Bloc": 4}
         }
@@ -393,71 +351,59 @@ class CNCManagerApp:
     def setup_catalog_tab(self):
         self.cat_cols = ("Modèle", "Programme", "Dimensions Bloc", "Volume", "Longueur", "Outils", "Fin Box", "Footstrap", "Remarques")
         self.tree_cat = ttk.Treeview(self.tab_cat, columns=self.cat_cols, show="headings", selectmode="extended")
-        
         for col in self.cat_cols:
             self.tree_cat.heading(col, text=col)
             self.tree_cat.column(col, width=100)
 
         self.tree_cat.tag_configure('already_selected', background='#E0E0E0', foreground='#888888')
-
         sb = ttk.Scrollbar(self.tab_cat, orient="vertical", command=self.tree_cat.yview)
         self.tree_cat.configure(yscroll=sb.set)
-        
         self.tree_cat.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         btn_frame = tk.Frame(self.tab_cat)
         btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
-        tk.Button(btn_frame, text="Ajouter les sélectionnés à l'Ordre de Fabrication", command=self.add_selected_to_worklist, bg="#4CAF50", fg="white").pack(side=tk.RIGHT, padx=10)
+        tk.Button(btn_frame, text="Ajouter à l'Ordre d'Usinage", command=self.add_selected_to_worklist, bg="#4CAF50", fg="white").pack(side=tk.RIGHT, padx=10)
 
     def setup_work_tab(self):
         self.work_cols = ("Prio", "Modèle", "Programme", "Dimensions Bloc", "N° Bloc", "N° Pain", "Outils", "Remarques", "Date", "Densité")
         self.tree_work = ttk.Treeview(self.tab_work, columns=self.work_cols, show="headings", selectmode="browse")
-
         for col in self.work_cols:
             self.tree_work.heading(col, text=col)
             self.tree_work.column(col, width=90)
 
         self.tree_work.tag_configure('missing_info', background='#FFCDD2')
-
         sb = ttk.Scrollbar(self.tab_work, orient="vertical", command=self.tree_work.yview)
         self.tree_work.configure(yscroll=sb.set)
-
         self.tree_work.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Panneau de contrôle à droite
         ctrl_frame = tk.Frame(self.tab_work, width=160)
         ctrl_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
 
         tk.Button(ctrl_frame, text="Monter ▲", command=self.move_work_item_up, width=16).pack(pady=5)
         tk.Button(ctrl_frame, text="Descendre ▼", command=self.move_work_item_down, width=16).pack(pady=5)
         tk.Button(ctrl_frame, text="Saisir Bloc/Pain", command=self.edit_block_info, width=16, bg="#2196F3", fg="white").pack(pady=10)
-        
-        # Bouton de transfert RS-232 vers CNC
         tk.Button(ctrl_frame, text="Transférer CNC (RS232)", command=self.open_transfer_dialog, width=16, bg="#9C27B0", fg="white").pack(pady=10)
-
         tk.Button(ctrl_frame, text="Supprimer", command=self.remove_from_worklist, width=16, bg="#F44336", fg="white").pack(pady=5)
         tk.Button(ctrl_frame, text="Valider Usinage", command=self.validate_worklist, width=16, bg="#FF9800", fg="white").pack(side=tk.BOTTOM, pady=10)
 
     def setup_history_tab(self):
         self.hist_cols = ("ID", "Opérateur", "Modèle", "Programme", "Dimensions", "N° Bloc", "N° Pain", "Date Bloc", "Densité", "Date Usinage")
         self.tree_hist = ttk.Treeview(self.tab_hist, columns=self.hist_cols, show="headings")
-
         for col in self.hist_cols:
             self.tree_hist.heading(col, text=col)
             self.tree_hist.column(col, width=90)
 
         sb = ttk.Scrollbar(self.tab_hist, orient="vertical", command=self.tree_hist.yview)
         self.tree_hist.configure(yscroll=sb.set)
-
         self.tree_hist.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
     def open_transfer_dialog(self):
         selected = self.tree_work.selection()
         if not selected:
-            messagebox.showwarning("Sélection", "Veuillez sélectionner une ligne dans l'Ordre d'Usinage pour transférer son programme.")
+            messagebox.showwarning("Sélection", "Veuillez sélectionner un élément dans l'Ordre d'Usinage.")
             return
         idx = self.tree_work.index(selected[0])
         prog_name = self.work_list[idx].get("program", "PROGRAM")
@@ -466,7 +412,6 @@ class CNCManagerApp:
     def on_tab_changed(self, event):
         selected_tab = self.notebook.select()
         tab_text = self.notebook.tab(selected_tab, "text").strip()
-
         if tab_text == "Catalogue Modèles":
             self.current_tab_key = "cat"
         elif tab_text == "Ordre d'Usinage":
@@ -505,101 +450,67 @@ class CNCManagerApp:
 
         if self.current_tab_key == "cat":
             tree = self.tree_cat
-            col_map = self.search_maps["cat"]
-            col_idx = col_map.get(selected_col_name, 0)
-
-            for item in tree.get_children():
-                tree.delete(item)
-
+            col_idx = self.search_maps["cat"].get(selected_col_name, 0)
+            for item in tree.get_children(): tree.delete(item)
             selected_models = [w["model"] for w in self.work_list]
 
             for r in self.catalog_rows:
                 display_vals = r[1:]
-                val_to_check = display_vals[col_idx] if col_idx < len(display_vals) else ""
-
-                if self.check_match(query, val_to_check):
+                val = display_vals[col_idx] if col_idx < len(display_vals) else ""
+                if self.check_match(query, val):
                     item_id = tree.insert("", tk.END, values=display_vals)
                     if display_vals[0] in selected_models:
                         tree.item(item_id, tags=('already_selected',))
 
         elif self.current_tab_key == "work":
             tree = self.tree_work
-            col_map = self.search_maps["work"]
-            col_idx = col_map.get(selected_col_name, 0)
-
-            for item in tree.get_children():
-                tree.delete(item)
+            col_idx = self.search_maps["work"].get(selected_col_name, 0)
+            for item in tree.get_children(): tree.delete(item)
 
             for item_data in self.work_list:
                 row_vals = (
-                    item_data.get("prio", ""),
-                    item_data.get("model", ""),
-                    item_data.get("program", ""),
-                    item_data.get("block_dim", ""),
-                    item_data.get("block_num", ""),
-                    item_data.get("pain_num", ""),
-                    item_data.get("tools", ""),
-                    item_data.get("remarks", ""),
-                    item_data.get("block_date", ""),
-                    item_data.get("block_density", "")
+                    item_data.get("prio", ""), item_data.get("model", ""), item_data.get("program", ""),
+                    item_data.get("block_dim", ""), item_data.get("block_num", ""), item_data.get("pain_num", ""),
+                    item_data.get("tools", ""), item_data.get("remarks", ""), item_data.get("block_date", ""), item_data.get("block_density", "")
                 )
-                val_to_check = row_vals[col_idx] if col_idx < len(row_vals) else ""
-                if self.check_match(query, val_to_check):
+                val = row_vals[col_idx] if col_idx < len(row_vals) else ""
+                if self.check_match(query, val):
                     item_id = tree.insert("", tk.END, values=row_vals)
                     if not item_data.get("block_num") or not item_data.get("pain_num"):
                         tree.item(item_id, tags=('missing_info',))
 
         elif self.current_tab_key == "history" and self.user['role'] == 'ADMIN':
             tree = self.tree_hist
-            col_map = self.search_maps["history"]
-            col_idx = col_map.get(selected_col_name, 0)
-
-            for item in tree.get_children():
-                tree.delete(item)
+            col_idx = self.search_maps["history"].get(selected_col_name, 0)
+            for item in tree.get_children(): tree.delete(item)
 
             if hasattr(self, 'history_rows'):
                 for r in self.history_rows:
-                    row_vals = r[0:]
-                    val_to_check = row_vals[col_idx] if col_idx < len(row_vals) else ""
-                    if self.check_match(query, val_to_check):
-                        item_id = tree.insert("", tk.END, values=row_vals)
-                        if not r[5] or not r[6]:
-                            tree.item(item_id, tags=('missing_info',))
+                    val = r[col_idx] if col_idx < len(r) else ""
+                    if self.check_match(query, val):
+                        tree.insert("", tk.END, values=r)
 
     def add_selected_to_worklist(self):
         selected_items = self.tree_cat.selection()
         if not selected_items:
-            messagebox.showwarning("Sélection", "Veuillez sélectionner au moins un modèle dans le catalogue.")
+            messagebox.showwarning("Attention", "Veuillez sélectionner au moins un modèle.")
             return
 
-        added_count = 0
         for item in selected_items:
             vals = self.tree_cat.item(item, "values")
-            model_name = vals[0]
-
-            if any(w["model"] == model_name for w in self.work_list):
+            if any(w["model"] == vals[0] for w in self.work_list):
                 continue
 
-            prio_num = len(self.work_list) + 1
-            new_entry = {
-                "prio": f"P{prio_num}",
-                "model": vals[0],
-                "program": vals[1],
-                "block_dim": vals[2],
-                "tools": vals[5],
-                "remarks": vals[8],
-                "block_num": "",
-                "pain_num": "",
-                "block_date": datetime.now().strftime("%Y-%m-%d"),
-                "block_density": ""
-            }
-            self.work_list.append(new_entry)
-            added_count += 1
+            self.work_list.append({
+                "prio": f"P{len(self.work_list) + 1}",
+                "model": vals[0], "program": vals[1], "block_dim": vals[2],
+                "tools": vals[5], "remarks": vals[8], "block_num": "",
+                "pain_num": "", "block_date": datetime.now().strftime("%Y-%m-%d"), "block_density": ""
+            })
 
         self.refresh_work_tree()
         self.load_catalog_data()
         self.save_worklist_to_db()
-        self.statusbar.config(text=f" {added_count} modèle(s) ajouté(s) à la liste de travail.")
 
     def refresh_work_tree(self):
         for idx, item in enumerate(self.work_list, start=1):
@@ -609,8 +520,7 @@ class CNCManagerApp:
 
     def move_work_item_up(self):
         selected = self.tree_work.selection()
-        if not selected:
-            return
+        if not selected: return
         idx = self.tree_work.index(selected[0])
         if idx > 0:
             self.work_list[idx], self.work_list[idx - 1] = self.work_list[idx - 1], self.work_list[idx]
@@ -619,8 +529,7 @@ class CNCManagerApp:
 
     def move_work_item_down(self):
         selected = self.tree_work.selection()
-        if not selected:
-            return
+        if not selected: return
         idx = self.tree_work.index(selected[0])
         if idx < len(self.work_list) - 1:
             self.work_list[idx], self.work_list[idx + 1] = self.work_list[idx + 1], self.work_list[idx]
@@ -629,22 +538,13 @@ class CNCManagerApp:
 
     def edit_block_info(self):
         selected = self.tree_work.selection()
-        if not selected:
-            messagebox.showwarning("Sélection", "Veuillez sélectionner une ligne dans l'Ordre de Fabrication.")
-            return
+        if not selected: return
         idx = self.tree_work.index(selected[0])
-        item_data = self.work_list[idx]
-
-        def on_save():
-            self.refresh_work_tree()
-            self.save_worklist_to_db()
-
-        EditBlockInfoDialog(self.root, item_data, on_save)
+        EditBlockInfoDialog(self.root, self.work_list[idx], lambda: (self.refresh_work_tree(), self.save_worklist_to_db()))
 
     def remove_from_worklist(self):
         selected = self.tree_work.selection()
-        if not selected:
-            return
+        if not selected: return
         idx = self.tree_work.index(selected[0])
         del self.work_list[idx]
         self.refresh_work_tree()
@@ -660,14 +560,9 @@ class CNCManagerApp:
             cursor.execute('''
                 INSERT INTO current_worklist (prio, model, program, block_dim, tools, remarks, block_num, pain_num, block_date, block_density)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                prio_val, item["model"], item["program"], item["block_dim"],
-                item["tools"], item["remarks"], item["block_num"], item["pain_num"],
-                item["block_date"], item["block_density"]
-            ))
+            ''', (prio_val, item["model"], item["program"], item["block_dim"], item["tools"], item["remarks"], item["block_num"], item["pain_num"], item["block_date"], item["block_density"]))
         conn.commit()
         conn.close()
-        self.statusbar.config(text=f" Liste de travail sauvegardée ({datetime.now().strftime('%H:%M:%S')}).")
 
     def load_saved_worklist(self):
         conn = sqlite3.connect(DB_FILE)
@@ -679,30 +574,20 @@ class CNCManagerApp:
         self.work_list = []
         for r in rows:
             self.work_list.append({
-                "prio": f"P{r[0]}",
-                "model": r[1],
-                "program": r[2],
-                "block_dim": r[3],
-                "tools": r[4],
-                "remarks": r[5],
-                "block_num": r[6],
-                "pain_num": r[7],
-                "block_date": r[8],
-                "block_density": r[9]
+                "prio": f"P{r[0]}", "model": r[1], "program": r[2], "block_dim": r[3],
+                "tools": r[4], "remarks": r[5], "block_num": r[6], "pain_num": r[7],
+                "block_date": r[8], "block_density": r[9]
             })
         self.refresh_work_tree()
 
     def validate_worklist(self):
-        if not self.work_list:
-            messagebox.showwarning("Attention", "La liste d'usinage est vide.")
-            return
-
+        if not self.work_list: return
         missing = [w["model"] for w in self.work_list if not w["block_num"] or not w["pain_num"]]
         if missing:
-            messagebox.showerror("Champs Manquants", f"Impossible de valider : les informations (N° Bloc / N° Pain) sont manquantes pour :\n- " + "\n- ".join(missing))
+            messagebox.showerror("Informations Manquantes", f"Veuillez remplir les champs Bloc/Pain pour :\n- " + "\n- ".join(missing))
             return
 
-        if not messagebox.askyesno("Validation Usinage", "Confirmez-vous l'enregistrement de ces usinages dans l'historique ?"):
+        if not messagebox.askyesno("Validation", "Valider et enregistrer l'usinage dans l'historique ?"):
             return
 
         conn = sqlite3.connect(DB_FILE)
@@ -711,10 +596,7 @@ class CNCManagerApp:
             cursor.execute('''
                 INSERT INTO machining_history (operator_username, model_name, program_name, block_dim, block_num, pain_num, block_date, block_density)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                self.user["username"], w["model"], w["program"], w["block_dim"],
-                w["block_num"], w["pain_num"], w["block_date"], w["block_density"]
-            ))
+            ''', (self.user["username"], w["model"], w["program"], w["block_dim"], w["block_num"], w["pain_num"], w["block_date"], w["block_density"]))
 
         cursor.execute("DELETE FROM current_worklist")
         conn.commit()
@@ -723,35 +605,27 @@ class CNCManagerApp:
         self.work_list = []
         self.refresh_work_tree()
         self.load_catalog_data()
-        if self.user['role'] == 'ADMIN':
-            self.load_history_data()
-
-        messagebox.showinfo("Succès", "Usinages validés et enregistrés avec succès dans l'historique !")
+        if self.user['role'] == 'ADMIN': self.load_history_data()
+        messagebox.showinfo("Succès", "Usinage enregistré !")
 
     def start_auto_save_thread(self):
         def auto_save_loop():
             while self.is_running:
                 time.sleep(120)
                 if self.is_running:
-                    try:
-                        self.save_worklist_to_db()
-                    except Exception:
-                        pass
-
+                    try: self.save_worklist_to_db()
+                    except Exception: pass
         threading.Thread(target=auto_save_loop, daemon=True).start()
 
     def on_app_close(self):
         self.is_running = False
-        try:
-            self.save_worklist_to_db()
-        except Exception:
-            pass
+        try: self.save_worklist_to_db()
+        except Exception: pass
         self.root.destroy()
 
-
-# --- DÉMARRAGE DU PROGRAMME ---
 if __name__ == "__main__":
     init_db()
+
     root = tk.Tk()
     root.withdraw()
 
@@ -760,7 +634,9 @@ if __name__ == "__main__":
 
     if login_dlg.user_data:
         root.deiconify()
+        root.update_idletasks()
         app = CNCManagerApp(root, login_dlg.user_data)
         root.mainloop()
     else:
         root.destroy()
+        sys.exit(0)
