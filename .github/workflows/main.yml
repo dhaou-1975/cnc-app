@@ -1,18 +1,32 @@
-name: Build Windows EXE
-on: [push]
+name: Build Executable for Windows 7
+
+on:
+  push:
+    branches: [ "main" ]
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2019
+
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
+    - uses: actions/checkout@v3
+
+    - name: Set up Python 3.8
+      uses: actions/setup-python@v4
       with:
-        python-version: '3.8.10'
-    - run: pip install pyinstaller
-    - name: Compile EXE
+        python-version: '3.8'
+
+    - name: Install dependencies
       run: |
-        Get-ChildItem -Filter *.py* | ForEach-Object { pyinstaller --noconsole --onefile $_.Name }
-    - uses: actions/upload-artifact@v4
+        python -m pip install --upgrade pip
+        pip install pyserial pyinstaller
+
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --noconsole --onefile --collect-all serial gemini-code-1786699564323.py
+
+    - name: Upload Executable
+      uses: actions/upload-artifact@v3
       with:
-        name: CNC_Manager_EXE
+        name: CNC-Manager-Win7
         path: dist/*.exe
