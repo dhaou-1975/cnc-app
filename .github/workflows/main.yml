@@ -7,13 +7,13 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-latest
 
     steps:
     - name: Checkout du code
       uses: actions/checkout@v3
 
-    - name: Configuration de Python 3.8 (Dernière version compatible Windows 7)
+    - name: Configuration de Python 3.8 (Compatible Windows 7)
       uses: actions/setup-python@v4
       with:
         python-version: '3.8.10'
