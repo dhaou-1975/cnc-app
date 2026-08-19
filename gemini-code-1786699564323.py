@@ -38,7 +38,7 @@ def init_db():
         )
     ''')
     
-    # Compte administrateur par défaut si la table est vide
+    # Comptes par défaut si la table est vide
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'Admin')")
@@ -56,12 +56,12 @@ class LoginDialog(tk.Toplevel):
         self.resizable(False, False)
         self.user_data = None
 
-        # Rendre la fenêtre toujours au premier plan et bloquante
+        # Rendre la fenêtre au premier plan et bloquante
         self.transient(parent)
         self.grab_set()
 
-        # Centrer sur l'écran
-        self.eval('tk::PlaceWindow . center')
+        # Centrer la fenêtre de connexion sur l'écran
+        parent.eval(f'tk::PlaceWindow {self._w} center')
 
         ttk.Label(self, text="CNC Manager - Authentification", font=("Arial", 11, "bold")).pack(pady=15)
 
@@ -224,7 +224,6 @@ def main():
     init_db()
 
     root = tk.Tk()
-    # Rend la fenêtre invisible sans suspendre la boucle graphique Windows 7
     root.withdraw()
 
     login_dlg = LoginDialog(root)
@@ -233,7 +232,7 @@ def main():
     if login_dlg.user_data:
         root.deiconify()
         root.geometry("1100x600")
-        root.eval('tk::PlaceWindow . center')
+        root.eval(f'tk::PlaceWindow {root._w} center')
         root.focus_force()
         app = CNCManagerApp(root, login_dlg.user_data)
         root.mainloop()
